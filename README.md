@@ -21,4 +21,6 @@ python -m src.show_metrics --all
 ```
 
 ## WebDemo
-```python -m src.webocr```
+```bash
+python -m src.webocr
+```
