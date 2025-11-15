@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.ipynb_checkpoints
+
+# Envs & tools
+.venv/
+.env/
+.gradio/
+*.log
+
+# Data & outputs
+data/
+runs/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

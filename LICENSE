@@ -1,0 +1,12 @@
+---
+
+# Git quick start (copy/paste)
+
+```bash
+git init
+git add .
+git commit -m "Initial commit: CRNN-CTC Arabic OCR + web demo"
+git branch -M main
+# create an empty GitHub repo named ArabicOCR_KHATT, then:
+git remote add origin https://github.com/<your-user>/ArabicOCR_KHATT.git
+git push -u origin main
