@@ -225,7 +225,7 @@ This is useful for testing on signs, notebook photos, product labels, etc.
 
 ⸻
 
-## 9. Git quick start (optional)
+## 9. Git quick start 
 
 If you clone this repo or want to reuse the template:
 
