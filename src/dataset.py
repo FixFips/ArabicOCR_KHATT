@@ -1,30 +1,34 @@
-import os # build a file path
-import pandas as pd  # able to make u read the csv files in ur system into a dataframe
-from PIL import Image # opens the image files in ur system
+import os
+import pandas as pd
+from PIL import Image
 from torch.utils.data import Dataset
-from .preprocess import (  # we import the below items from our preprocess
+from .preprocess import (
     to_grayscale, binarize, normalize,
     resize_keep_ratio_height, pad_width, pad_to_square
 )
 
+
 def read_label(path: str) -> str:
-    for enc in ["windows-1256", "utf-8", "utf-8-sig"]: # the data label is encoded so we need to try some common encoding
+    for enc in ["windows-1256", "utf-8", "utf-8-sig"]:
         try:
             with open(path, "r", encoding=enc) as f:
-                return f.read().strip() #returns the file content with strip which removes any white spaces.
+                return f.read().strip()
         except Exception:
             pass
     raise RuntimeError(f"Cannot read label file: {path}")
 
-class KHATTDataset(Dataset): #so the pytorch can know where is ur path and report the data length + fetch a single item for training
+
+class KHATTDataset(Dataset):
     def __init__(self, csv_path: str, images_dir: str,
-                 mode: str = "crnn", crnn_h: int = 64, crnn_max_w: int = 1024, trocr_side: int = 384):
+                 mode: str = "crnn", crnn_h: int = 96, crnn_max_w: int = 1536,
+                 trocr_side: int = 384, augment=None):
         self.df = pd.read_csv(csv_path)
         self.images_dir = images_dir
         self.mode = mode
         self.crnn_h = crnn_h
         self.crnn_max_w = crnn_max_w
         self.trocr_side = trocr_side
+        self.augment = augment
 
     def __len__(self):
         return len(self.df)
@@ -39,10 +43,14 @@ class KHATTDataset(Dataset): #so the pytorch can know where is ur path and repor
         img = binarize(img)
         img = normalize(img)
 
+        # Arabic-safe augmentation (training only, before resize/pad)
+        if self.augment is not None:
+            img = self.augment(img)
+
         if self.mode == "crnn":
             img = resize_keep_ratio_height(img, self.crnn_h)
             if img.width > self.crnn_max_w:
-                img = img.resize((self.crnn_max_w, self.crnn_h), Image.BILINEAR)
+                img = img.resize((self.crnn_max_w, self.crnn_h), Image.LANCZOS)
             img = pad_width(img, self.crnn_max_w)
         else:
             img = pad_to_square(img, self.trocr_side)

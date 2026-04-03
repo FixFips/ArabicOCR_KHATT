@@ -37,7 +37,9 @@ def binarize(img: Image.Image) -> Image.Image:
 
     # 6) light cleanup
     th = cv2.medianBlur(th, 3)
-    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
+    # Horizontal-only kernel: removes horizontal noise specks without
+    # destroying vertically-compact Arabic dots (2-4 px tall).
+    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((1, 2), np.uint8), iterations=1)
 
     return Image.fromarray(th)
 
@@ -48,7 +50,8 @@ def normalize(img: Image.Image) -> Image.Image:
 def resize_keep_ratio_height(img: Image.Image, target_h: int) -> Image.Image:
     w, h = img.size
     new_w = max(1, int(w * (target_h / h)))
-    return img.resize((new_w, target_h), Image.BILINEAR)
+    # LANCZOS preserves sharp small features (Arabic dots) during downscaling
+    return img.resize((new_w, target_h), Image.LANCZOS)
 
 def pad_width(img: Image.Image, max_w: int) -> Image.Image:
     bg = Image.new("L", (max_w, img.height), 255)

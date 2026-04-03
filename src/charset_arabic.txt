@@ -11,7 +11,7 @@
 9
 
 # Basic punctuation
- 
+
 !
 .
 ،
@@ -20,6 +20,13 @@
 "
 '
 -
+:
+#
+(
+)
+,
+%
+/
 
 # Arabic letters
 ء

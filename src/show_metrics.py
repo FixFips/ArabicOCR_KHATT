@@ -8,7 +8,7 @@ def load_metrics_csv(path):
         r = csv.DictReader(f)
         for row in r:
             # cast numbers
-            for k in ["epoch","train_loss","cer","wer","wer_norm","train_batches","val_batches","ckpt_saved"]:
+            for k in ["epoch","train_loss","cer","wer","wer_norm","dot_cer","train_batches","val_batches","ckpt_saved"]:
                 if k in row:
                     try:
                         row[k] = float(row[k]) if k not in ("epoch","train_batches","val_batches","ckpt_saved") else int(float(row[k]))
@@ -30,16 +30,23 @@ def show_run(run_dir):
     # best by CER
     best = min(rows, key=lambda r: r["cer"])
     last = rows[-1]
+    dot_str = lambda r: f" | DotCER: {r['dot_cer']:.3f}" if "dot_cer" in r and r["dot_cer"] != "" else ""
     print(f"\n=== {run_dir} ===")
-    print(f"epochs: {len(rows)} | best epoch (CER): {best['epoch']} | best CER: {best['cer']:.3f} | WER: {best['wer']:.3f} | WER(norm): {best['wer_norm']:.3f}")
-    print(f"last  : epoch {last['epoch']} | train_loss: {last['train_loss']:.3f} | CER: {last['cer']:.3f} | WER: {last['wer']:.3f} | WER(norm): {last['wer_norm']:.3f}")
+    print(f"epochs: {len(rows)} | best epoch (CER): {best['epoch']} | best CER: {best['cer']:.3f} | WER: {best['wer']:.3f} | WER(norm): {best['wer_norm']:.3f}{dot_str(best)}")
+    print(f"last  : epoch {last['epoch']} | train_loss: {last['train_loss']:.3f} | CER: {last['cer']:.3f} | WER: {last['wer']:.3f} | WER(norm): {last['wer_norm']:.3f}{dot_str(last)}")
 
     # show a short table tail
     tail = rows[-10:] if len(rows) > 10 else rows
-    print("\n epoch | train_loss |   CER  |  WER  | WER(n) | saved")
-    print("-------+------------+--------+-------+--------+------")
+    has_dot = "dot_cer" in tail[0] and tail[0]["dot_cer"] != ""
+    hdr = " epoch | train_loss |   CER  | DotCER |  WER  | WER(n) | saved" if has_dot else " epoch | train_loss |   CER  |  WER  | WER(n) | saved"
+    sep = "-------+------------+--------+--------+-------+--------+------" if has_dot else "-------+------------+--------+-------+--------+------"
+    print(f"\n{hdr}")
+    print(sep)
     for r in tail:
-        print(f"{int(r['epoch']):5d} | {r['train_loss']:10.3f} | {r['cer']:6.3f} | {r['wer']:5.3f} | {r['wer_norm']:6.3f} |  {int(r['ckpt_saved'])}")
+        if has_dot:
+            print(f"{int(r['epoch']):5d} | {r['train_loss']:10.3f} | {r['cer']:6.3f} | {r['dot_cer']:6.3f} | {r['wer']:5.3f} | {r['wer_norm']:6.3f} |  {int(r['ckpt_saved'])}")
+        else:
+            print(f"{int(r['epoch']):5d} | {r['train_loss']:10.3f} | {r['cer']:6.3f} | {r['wer']:5.3f} | {r['wer_norm']:6.3f} |  {int(r['ckpt_saved'])}")
 
 def main():
     ap = argparse.ArgumentParser()
