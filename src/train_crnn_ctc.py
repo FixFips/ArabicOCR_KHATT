@@ -111,6 +111,23 @@ def _append_metrics(epoch, train_loss, cer, wer, wer_n, dot_cer, train_batches, 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         f.write(f"{ts},{epoch},{train_loss:.6f},{cer:.6f},{wer:.6f},{wer_n:.6f},{dot_cer:.6f},{train_batches},{val_batches},{int(ckpt_saved)},{lr:.2e}\n")
 
+# ------------- Collate (must be top-level for Windows multiprocessing) -------------
+class CRNNCollate:
+    """Picklable collate function for Windows DataLoader workers."""
+    def __init__(self, char2id, unk_id):
+        self.char2id = char2id
+        self.unk_id = unk_id
+        self.to_tensor = transforms.ToTensor()
+
+    def __call__(self, batch):
+        imgs, texts_orig = zip(*batch)
+        texts_ltr = [t[::-1] for t in texts_orig]     # LTR time-axis
+        imgs = torch.stack([self.to_tensor(im) for im in imgs], dim=0)
+        targets = [torch.tensor(text_to_ids(t, self.char2id, self.unk_id), dtype=torch.long) for t in texts_ltr]
+        target_lengths = torch.tensor([len(t) for t in targets], dtype=torch.long)
+        targets = torch.cat(targets) if len(targets) else torch.tensor([], dtype=torch.long)
+        return imgs, targets, target_lengths, list(texts_orig)
+
 # ------------- Train -------------
 def main():
     os.makedirs(RUN_DIR, exist_ok=True)
@@ -135,16 +152,7 @@ def main():
         mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W,
     )
 
-    to_tensor = transforms.ToTensor()
-
-    def collate(batch):
-        imgs, texts_orig = zip(*batch)
-        texts_ltr = [t[::-1] for t in texts_orig]     # LTR time-axis
-        imgs = torch.stack([to_tensor(im) for im in imgs], dim=0)
-        targets = [torch.tensor(text_to_ids(t, char2id, unk_id), dtype=torch.long) for t in texts_ltr]
-        target_lengths = torch.tensor([len(t) for t in targets], dtype=torch.long)
-        targets = torch.cat(targets) if len(targets) else torch.tensor([], dtype=torch.long)
-        return imgs, targets, target_lengths, list(texts_orig)
+    collate = CRNNCollate(char2id, unk_id)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=2, pin_memory=True, collate_fn=collate)
