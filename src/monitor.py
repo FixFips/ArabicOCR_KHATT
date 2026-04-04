@@ -1,6 +1,6 @@
 # src/monitor.py
 """
-Live training monitor — serves a web dashboard that reads metrics.csv.
+Live training monitor — serves a web dashboard that reads metrics.csv + sample predictions.
 Access from any device on the same network.
 
 Usage:
@@ -11,12 +11,14 @@ Usage:
 import os
 import csv
 import json
+import glob
 import argparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 METRICS_PATH = os.path.join("runs", "exp1", "metrics.csv")
+RUN_DIR = os.path.join("runs", "exp1")
 
-HTML_PAGE = """<!DOCTYPE html>
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -44,7 +46,33 @@ HTML_PAGE = """<!DOCTYPE html>
   .chart-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .chart-box h3 { margin-bottom: 10px; font-size: 0.95em; color: #8b949e; }
   canvas { width: 100% !important; }
-  .status { text-align: center; margin-top: 12px; color: #8b949e; font-size: 0.8em; }
+
+  /* Samples section */
+  .samples-section { max-width: 1200px; margin: 24px auto 0; }
+  .samples-section h2 { font-size: 1.1em; color: #8b949e; margin-bottom: 4px; }
+  .samples-epoch { color: #58a6ff; font-size: 0.85em; margin-bottom: 12px; }
+  .samples-list { display: flex; flex-direction: column; gap: 8px; }
+  .sample-row { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+                padding: 12px 16px; direction: rtl; text-align: right; }
+  .sample-row .gt-line { color: #7ee787; font-size: 0.95em; margin-bottom: 6px;
+                          font-family: 'Segoe UI', 'Geeza Pro', 'Arabic Typesetting', sans-serif; }
+  .sample-row .pr-line { color: #f78166; font-size: 0.95em;
+                          font-family: 'Segoe UI', 'Geeza Pro', 'Arabic Typesetting', sans-serif; }
+  .sample-row .tag { direction: ltr; text-align: left; display: inline-block;
+                      font-size: 0.7em; font-weight: 700; border-radius: 4px;
+                      padding: 1px 6px; margin-left: 8px; vertical-align: middle; }
+  .sample-row .tag.gt { background: #23352a; color: #7ee787; }
+  .sample-row .tag.pr { background: #352320; color: #f78166; }
+  .sample-row.match { border-color: #238636; }
+  .sample-row.match .pr-line { color: #7ee787; }
+  .sample-hidden { display: none; }
+  .show-more-btn { display: block; margin: 12px auto; padding: 8px 24px;
+                   background: #21262d; color: #8b949e; border: 1px solid #30363d;
+                   border-radius: 6px; cursor: pointer; font-size: 0.9em; }
+  .show-more-btn:hover { background: #30363d; color: #e6edf3; }
+  .no-samples { color: #8b949e; text-align: center; padding: 20px; font-style: italic; }
+
+  .status { text-align: center; margin-top: 16px; color: #8b949e; font-size: 0.8em; }
   .status .live { color: #3fb950; }
   @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
 </style>
@@ -69,9 +97,22 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="chart-box"><h3>Learning Rate</h3><canvas id="chart-lr"></canvas></div>
 </div>
 
+<div class="samples-section">
+  <h2>GT vs Prediction Samples</h2>
+  <p class="samples-epoch" id="samples-epoch"></p>
+  <div class="samples-list" id="samples-list">
+    <p class="no-samples">No samples yet — predictions appear after epoch 1</p>
+  </div>
+  <button class="show-more-btn" id="show-more-btn" style="display:none;" onclick="showMore()">Show more samples</button>
+</div>
+
 <p class="status">Auto-refresh every <strong>30s</strong> &middot; <span class="live" id="status-text">waiting...</span></p>
 
 <script>
+const INITIAL_SHOW = 10;
+let allSamples = [];
+let visibleCount = INITIAL_SHOW;
+
 const chartOpts = (yLabel) => ({
   responsive: true,
   animation: { duration: 300 },
@@ -108,8 +149,61 @@ const lrChart = new Chart(document.getElementById('chart-lr'), {
   ]}, options: chartOpts('LR')
 });
 
+function renderSamples() {
+  const container = document.getElementById('samples-list');
+  const btn = document.getElementById('show-more-btn');
+
+  if (!allSamples.length) {
+    container.innerHTML = '<p class="no-samples">No samples yet \u2014 predictions appear after epoch 1</p>';
+    btn.style.display = 'none';
+    return;
+  }
+
+  let html = '';
+  for (let i = 0; i < allSamples.length; i++) {
+    const s = allSamples[i];
+    const isMatch = s.gt.trim() === s.pr.trim();
+    const hidden = i >= visibleCount ? ' sample-hidden' : '';
+    const matchCls = isMatch ? ' match' : '';
+    const num = String(i + 1).padStart(3, ' ');
+    html += '<div class="sample-row' + matchCls + hidden + '" data-idx="' + i + '">'
+         + '<div class="gt-line"><span class="tag gt">GT</span> ' + escapeHtml(s.gt) + '</div>'
+         + '<div class="pr-line"><span class="tag pr">PR</span> ' + (s.pr || '<em style="color:#484f58">(empty)</em>') + '</div>'
+         + '</div>';
+  }
+  container.innerHTML = html;
+
+  if (allSamples.length > visibleCount) {
+    btn.style.display = 'block';
+    btn.textContent = 'Show more (' + (allSamples.length - visibleCount) + ' remaining)';
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+function showMore() {
+  visibleCount = Math.min(visibleCount + 20, allSamples.length);
+  const rows = document.querySelectorAll('.sample-row');
+  rows.forEach((row, i) => {
+    if (i < visibleCount) row.classList.remove('sample-hidden');
+  });
+  const btn = document.getElementById('show-more-btn');
+  if (visibleCount >= allSamples.length) {
+    btn.style.display = 'none';
+  } else {
+    btn.textContent = 'Show more (' + (allSamples.length - visibleCount) + ' remaining)';
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
 async function refresh() {
   try {
+    // Fetch metrics
     const r = await fetch('/api/metrics?_=' + Date.now());
     const rows = await r.json();
     if (!rows.length) { document.getElementById('status-text').textContent = 'no data yet'; return; }
@@ -143,8 +237,18 @@ async function refresh() {
     lrChart.data.datasets[0].data = rows.map(r => r.lr);
     lrChart.update();
 
+    // Fetch samples
+    const sr = await fetch('/api/samples?_=' + Date.now());
+    const sdata = await sr.json();
+    if (sdata.epoch) {
+      document.getElementById('samples-epoch').textContent = 'Latest epoch: ' + sdata.epoch + ' (' + sdata.total + ' samples)';
+      allSamples = sdata.samples;
+      visibleCount = INITIAL_SHOW;
+      renderSamples();
+    }
+
     const now = new Date().toLocaleTimeString();
-    document.getElementById('status-text').textContent = 'updated ' + now + ' — epoch ' + last.epoch + '/120';
+    document.getElementById('status-text').textContent = 'updated ' + now + ' \u2014 epoch ' + last.epoch + '/120';
   } catch(e) {
     document.getElementById('status-text').textContent = 'error: ' + e.message;
   }
@@ -161,6 +265,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/metrics"):
             self._serve_metrics()
+        elif self.path.startswith("/api/samples"):
+            self._serve_samples()
         else:
             self._serve_html()
 
@@ -189,11 +295,48 @@ class MonitorHandler(BaseHTTPRequestHandler):
                         })
                     except (ValueError, KeyError):
                         pass
+        self._json_response(rows)
+
+    def _serve_samples(self):
+        # Find the latest val_epoch_*_samples.tsv file
+        pattern = os.path.join(RUN_DIR, "val_epoch_*_samples.tsv")
+        files = sorted(glob.glob(pattern))
+        if not files:
+            self._json_response({"epoch": None, "total": 0, "samples": []})
+            return
+
+        latest = files[-1]
+        # Extract epoch number from filename like val_epoch_003_samples.tsv
+        basename = os.path.basename(latest)
+        epoch_str = basename.replace("val_epoch_", "").replace("_samples.tsv", "")
+        try:
+            epoch_num = int(epoch_str)
+        except ValueError:
+            epoch_num = 0
+
+        samples = []
+        try:
+            with open(latest, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    gt = row.get("label", "")
+                    pr = row.get("pred", "")
+                    samples.append({"gt": gt, "pr": pr})
+        except Exception:
+            pass
+
+        self._json_response({
+            "epoch": epoch_num,
+            "total": len(samples),
+            "samples": samples,
+        })
+
+    def _json_response(self, data):
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(json.dumps(rows).encode("utf-8"))
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
     def log_message(self, format, *args):
         pass  # suppress request logs
