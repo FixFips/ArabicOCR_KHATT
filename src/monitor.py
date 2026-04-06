@@ -572,9 +572,14 @@ class MonitorHandler(BaseHTTPRequestHandler):
     def _serve_metrics(self):
         rows = []
         if os.path.exists(METRICS_PATH):
-            with open(METRICS_PATH, "r", encoding="utf-8") as f:
+            with open(METRICS_PATH, "r", encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f)
+                # Strip whitespace from header names (Windows CSV artifacts)
+                if reader.fieldnames:
+                    reader.fieldnames = [n.strip() for n in reader.fieldnames]
                 for row in reader:
+                    # Normalize keys: strip whitespace from values too
+                    row = {k.strip(): v.strip() if isinstance(v, str) else v for k, v in row.items()}
                     try:
                         rows.append({
                             "epoch": int(float(row.get("epoch", 0))),
