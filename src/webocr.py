@@ -171,15 +171,161 @@ def segment_into_lines(
 def stack_preview(imgs: List[Image.Image]) -> Image.Image:
     if len(imgs) == 1:
         return imgs[0]
-    widths = [im.width for im in imgs]
-    maxw = max(widths)
+    mode = "RGB" if any(im.mode != "L" for im in imgs) else "L"
+    bg = (255, 255, 255) if mode == "RGB" else 255
+    maxw = max(im.width for im in imgs)
     totalh = sum(im.height for im in imgs) + 4 * (len(imgs) - 1)
-    canvas = Image.new("L", (maxw, totalh), 255)
+    canvas = Image.new(mode, (maxw, totalh), bg)
     y = 0
     for im in imgs:
+        if im.mode != mode:
+            im = im.convert(mode)
         canvas.paste(im, (0, y))
         y += im.height + 4
     return canvas
+
+
+# ---------------- Confidence heatmap ----------------
+def _confidence_strip(logits: torch.Tensor, width: int, height: int = 10) -> Image.Image:
+    """Build an RGB strip where each CTC timestep's max softmax probability
+    is colorized (red=low, yellow=mid, green=high). Width is repeated to
+    match the prepped-image pixel width."""
+    probs = logits.softmax(-1).detach().cpu().numpy()
+    conf = probs[:, 0, :].max(axis=-1)
+    T = conf.shape[0]
+
+    strip = np.zeros((height, width, 3), dtype=np.uint8)
+    tile_w = width // T
+    extra  = width - tile_w * T
+    x = 0
+    for t in range(T):
+        w = tile_w + (1 if t < extra else 0)
+        c = float(conf[t])
+        if c < 0.5:
+            r, g = 255, int(510 * c)
+        else:
+            r, g = int(510 * (1.0 - c)), 255
+        strip[:, x:x + w] = [r, g, 0]
+        x += w
+    return Image.fromarray(strip, mode="RGB")
+
+
+def _attach_strip(prep: Image.Image, strip: Image.Image, gap: int = 2) -> Image.Image:
+    base = prep.convert("RGB")
+    if strip.width != base.width:
+        strip = strip.resize((base.width, strip.height), Image.NEAREST)
+    canvas = Image.new("RGB", (base.width, base.height + gap + strip.height), (255, 255, 255))
+    canvas.paste(base, (0, 0))
+    canvas.paste(strip, (0, base.height + gap))
+    return canvas
+
+
+# ---------------- Preprocessing stages (for the "Pipeline" tab) ----------------
+def preprocessing_stages(pil: Image.Image, upscale: float = 1.0,
+                         force_invert: bool = False) -> dict:
+    """Return each intermediate image in the preprocessing pipeline as a PIL.
+
+    Useful for showing reviewers exactly what the model ingests.
+    """
+    stages = {"raw": pil.convert("RGB")}
+    if upscale and upscale != 1.0:
+        w, h = pil.size
+        pil = pil.resize((max(1, int(w * upscale)), max(1, int(h * upscale))), Image.BICUBIC)
+        stages["upscaled"] = pil.convert("RGB")
+    if force_invert:
+        pil = ImageOps.invert(pil.convert("RGB"))
+        stages["inverted"] = pil.convert("RGB")
+    gray = to_grayscale(pil)
+    stages["grayscale"] = gray.convert("RGB")
+    binar = binarize(gray)
+    if np.asarray(binar).mean() < 127:
+        binar = ImageOps.invert(binar)
+    stages["binarized"] = binar.convert("RGB")
+    resized = resize_keep_ratio_height(binar, HEIGHT)
+    if resized.width > MAX_W:
+        resized = resized.resize((MAX_W, HEIGHT), Image.LANCZOS)
+    stages[f"resized H={HEIGHT}"] = resized.convert("RGB")
+    padded = pad_width(resized, MAX_W)
+    stages[f"padded W={MAX_W}"] = padded.convert("RGB")
+    return stages
+
+
+# ---------------- Save-as-PNG export ----------------
+def _render_report_png(pred: str, gt: str, preview: Optional[Image.Image],
+                       metrics_txt: str, config_txt: str) -> Optional[str]:
+    """Compose preview + prediction + GT + metrics into a single PNG.
+    Returns a temp file path (None if preview is missing).
+    Arabic glyphs are rasterized via PIL's default font; the goal here is a
+    shareable screenshot, not typographic perfection."""
+    if preview is None:
+        return None
+    try:
+        from PIL import ImageDraw, ImageFont
+    except Exception:
+        return None
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 22)
+        small = ImageFont.truetype("arial.ttf", 16)
+    except Exception:
+        font = ImageFont.load_default()
+        small = font
+
+    margin = 18
+    text_block = []
+    if config_txt:   text_block.append(("cfg", config_txt, small, "#8b949e"))
+    if metrics_txt:  text_block.append(("metric", metrics_txt, font, "#e6edf3"))
+    if gt.strip():   text_block.append(("gt", "GT: " + gt.strip(), small, "#7ee787"))
+    if pred.strip(): text_block.append(("pr", "PR: " + pred.strip(), small, "#f78166"))
+
+    # Measure
+    line_h = 28
+    text_h = margin * 2 + line_h * len(text_block)
+    w = max(preview.width, 800) + margin * 2
+    h = preview.height + text_h + margin * 3
+
+    canvas = Image.new("RGB", (w, h), (13, 17, 23))
+    canvas.paste(preview.convert("RGB"), (margin, margin))
+
+    draw = ImageDraw.Draw(canvas)
+    y = preview.height + margin * 2
+    for _tag, txt, fnt, color in text_block:
+        draw.text((margin, y), txt, font=fnt, fill=color)
+        y += line_h
+
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    canvas.save(tmp.name, "PNG")
+    tmp.close()
+    return tmp.name
+
+
+# ---------------- Curated KHATT examples ----------------
+def get_example_list() -> list:
+    """Pre-curated KHATT samples useful for demos: dot-confusion, multi-line, etc.
+
+    Returns a list of [filename, label, description] triples drawn from the
+    KHATT val split. Only items whose image exists locally are returned.
+    """
+    curated = [
+        ("AHTD3A0019_Para1_1.jpg", "dot-group heavy sample"),
+        ("AHTD3A0023_Para1_1.jpg", "typical line"),
+        ("AHTD3A0040_Para1_1.jpg", "multi-word"),
+        ("AHTD3A0055_Para1_1.jpg", "dense handwriting"),
+        ("AHTD3A0089_Para1_1.jpg", "faint scan"),
+    ]
+    rows = []
+    for fname, note in curated:
+        img_path = os.path.join(IMAGES_DIR, fname)
+        lbl_path = os.path.join("./archive/labels", os.path.splitext(fname)[0] + ".txt")
+        if not os.path.exists(img_path):
+            continue
+        try:
+            gt = read_label(lbl_path)
+        except Exception:
+            gt = ""
+        rows.append([fname, gt, note])
+    return rows
 
 
 # ---------------- Utilities: rotation ----------------
@@ -247,11 +393,13 @@ def load_random_sample(split: str = "test") -> Tuple[Optional[Image.Image], str,
 
 
 # ---------------- Decode helpers ----------------
-def _decode_one(im_pil: Image.Image, device: torch.device, id2char,
-                use_beam: bool = False, beam_width: int = 10,
-                lm_weight: float = 0.0) -> str:
+def _forward_logits(im_pil: Image.Image) -> torch.Tensor:
     x = to_tensor(im_pil).unsqueeze(0).to(device)
-    logits = model(x)
+    return model(x)  # [T, 1, C]
+
+
+def _decode_from_logits(logits: torch.Tensor, use_beam: bool = False,
+                        beam_width: int = 10, lm_weight: float = 0.0) -> str:
     if use_beam:
         lm = get_bigram_lm() if lm_weight > 0 else None
         hyp_ltr = ctc_beam_decode(logits, id2char,
@@ -263,6 +411,13 @@ def _decode_one(im_pil: Image.Image, device: torch.device, id2char,
     return hyp_ltr[::-1]  # back to RTL
 
 
+def _decode_one(im_pil: Image.Image, device: torch.device, id2char,
+                use_beam: bool = False, beam_width: int = 10,
+                lm_weight: float = 0.0) -> str:
+    """Forward + decode in one call. Kept for call sites that don't need the logits."""
+    return _decode_from_logits(_forward_logits(im_pil), use_beam, beam_width, lm_weight)
+
+
 @torch.inference_mode()
 def recognize_image(
     pil_img: Image.Image,
@@ -272,40 +427,46 @@ def recognize_image(
     use_beam: bool = False,
     beam_width: int = 10,
     lm_weight: float = 0.0,
+    show_heatmap: bool = True,
 ) -> Tuple[str, Image.Image]:
     lines = segment_into_lines(pil_img) if force_multiline else [pil_img]
 
-    selected_prepped: List[Image.Image] = []
+    previews: List[Image.Image] = []
     texts: List[str] = []
-
-    def _dec(img):
-        return _decode_one(img, device, id2char,
-                           use_beam=use_beam, beam_width=beam_width,
-                           lm_weight=lm_weight)
 
     for ln in lines:
         if polarity_mode == "normal":
-            prep_n = prep_line(ln, upscale=upscale, force_invert=False)
-            prep_best, txt_best = prep_n, _dec(prep_n)
+            prep_best = prep_line(ln, upscale=upscale, force_invert=False)
+            logits_best = _forward_logits(prep_best)
 
         elif polarity_mode == "invert":
-            prep_i = prep_line(ln, upscale=upscale, force_invert=True)
-            prep_best, txt_best = prep_i, _dec(prep_i)
+            prep_best = prep_line(ln, upscale=upscale, force_invert=True)
+            logits_best = _forward_logits(prep_best)
 
-        else:  # auto: try both, choose longer non-blank
+        else:  # auto: forward both, pick longer greedy
             prep_n = prep_line(ln, upscale=upscale, force_invert=False)
-            txt_n = _dec(prep_n)
             prep_i = prep_line(ln, upscale=upscale, force_invert=True)
-            txt_i = _dec(prep_i)
-            if len(txt_i.strip()) > len(txt_n.strip()):
-                prep_best, txt_best = prep_i, txt_i
+            ln_ = _forward_logits(prep_n); li_ = _forward_logits(prep_i)
+            tn = _decode_from_logits(ln_, use_beam=False)
+            ti = _decode_from_logits(li_, use_beam=False)
+            if len(ti.strip()) > len(tn.strip()):
+                prep_best, logits_best = prep_i, li_
             else:
-                prep_best, txt_best = prep_n, txt_n
+                prep_best, logits_best = prep_n, ln_
 
-        selected_prepped.append(prep_best)
+        txt_best = _decode_from_logits(logits_best, use_beam=use_beam,
+                                       beam_width=beam_width, lm_weight=lm_weight)
+
+        if show_heatmap:
+            strip = _confidence_strip(logits_best, width=prep_best.width)
+            preview = _attach_strip(prep_best, strip)
+        else:
+            preview = prep_best
+
+        previews.append(preview)
         texts.append(txt_best)
 
-    stacked = stack_preview(selected_prepped)
+    stacked = stack_preview(previews)
     return "\n".join(texts), stacked
 
 
@@ -410,15 +571,22 @@ def _diff_html(gt: str, pred: str) -> str:
     )
 
 
+def _err(msg: str):
+    return (f'<div style="color:#f85149;padding:8px 10px;background:#2a1414;'
+            f'border:1px solid #5d2324;border-radius:6px">⚠ {msg}</div>')
+
+
 def infer(editor_payload: Any, use_cropped: bool, angle: float, upscale: float,
           force_multiline: bool, polarity_label: str, use_beam: bool,
-          beam_width: int, lm_weight: float, gt_text: str):
+          beam_width: int, lm_weight: float, show_heatmap: bool, gt_text: str):
     if editor_payload is None:
-        return "", None, "", "", ""
+        return "", None, _err("No image — upload, paste, or use Load Random Sample."), "", ""
     try:
         pil = ensure_pil_from_editor(editor_payload, use_cropped=use_cropped)
     except Exception as e:
-        return f"Unsupported image format ({type(editor_payload)}): {e}", None, "", "", ""
+        return "", None, _err(f"Unsupported image format: {e}"), "", ""
+    if pil is None or pil.size == (0, 0):
+        return "", None, _err("Image is empty."), "", ""
 
     pil = rotate_if_needed(pil, angle)
     mode = _map_polarity(polarity_label)
@@ -427,6 +595,7 @@ def infer(editor_payload: Any, use_cropped: bool, angle: float, upscale: float,
         pil, upscale=upscale, force_multiline=force_multiline,
         polarity_mode=mode, use_beam=use_beam,
         beam_width=int(beam_width), lm_weight=float(lm_weight),
+        show_heatmap=bool(show_heatmap),
     )
     elapsed_ms = (time.perf_counter() - t0) * 1000
     info = f'<span style="color:#8b949e">decoded in {elapsed_ms:.0f} ms &middot; device={device.type}</span>'
@@ -519,57 +688,243 @@ def load_sample_cb(split: str):
     return img, gt, f'<span style="color:#8b949e">loaded: {info}</span>'
 
 
+# ---------------- Preprocessing tab handler ----------------
+def show_pipeline_stages(editor_payload: Any, use_cropped: bool, angle: float,
+                         upscale: float, polarity_label: str):
+    if editor_payload is None:
+        return [], _err("Upload an image first.")
+    try:
+        pil = ensure_pil_from_editor(editor_payload, use_cropped=use_cropped)
+    except Exception as e:
+        return [], _err(f"Unsupported image: {e}")
+    pil = rotate_if_needed(pil, angle)
+    pol = _map_polarity(polarity_label)
+    force_invert = (pol == "invert")
+    stages = preprocessing_stages(pil, upscale=upscale, force_invert=force_invert)
+    # Gradio Gallery accepts list of (image, caption)
+    gallery = [(img, name) for name, img in stages.items()]
+    return gallery, ""
+
+
+# ---------------- Save-report callback ----------------
+def save_report_cb(pred: str, gt: str, preview: Optional[Image.Image],
+                   metrics_html: str, timing_html: str):
+    # Strip tags from HTML for a plain-text summary line
+    import re as _re
+    def _plain(h): return _re.sub(r"<[^>]+>", "", h or "").strip()
+    metrics_txt = _plain(metrics_html)
+    cfg_txt = _plain(timing_html)
+    path = _render_report_png(pred or "", gt or "", preview, metrics_txt, cfg_txt)
+    if path is None:
+        return None
+    return path
+
+
+# ---------------- Batch-mode handler ----------------
+@torch.inference_mode()
+def run_batch(files: list, use_beam: bool, beam_width: int, lm_weight: float,
+              force_multiline: bool, polarity_label: str, upscale: float):
+    import zipfile
+    import tempfile
+    import csv as _csv
+
+    if not files:
+        return None, _err("Select image files or a ZIP — then click Run batch.")
+
+    # Collect (filename, image_bytes) pairs. Accept: single images, multiple images, ZIPs.
+    items: List[Tuple[str, Image.Image]] = []
+    for f in files:
+        # Gradio passes filepath strings for type="filepath"
+        path = f if isinstance(f, str) else getattr(f, "name", None)
+        if not path or not os.path.exists(path):
+            continue
+        low = path.lower()
+        if low.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(path, "r") as z:
+                    for name in z.namelist():
+                        nlow = name.lower()
+                        if not nlow.endswith((".png", ".jpg", ".jpeg")):
+                            continue
+                        data = z.read(name)
+                        try:
+                            im = Image.open(__import__("io").BytesIO(data)).convert("RGB")
+                        except Exception:
+                            continue
+                        items.append((os.path.basename(name), im))
+            except Exception:
+                continue
+        elif low.endswith((".png", ".jpg", ".jpeg")):
+            try:
+                items.append((os.path.basename(path), Image.open(path).convert("RGB")))
+            except Exception:
+                continue
+
+    if not items:
+        return None, _err("No supported images found (.png/.jpg/.jpeg, directly or inside .zip).")
+
+    pol = _map_polarity(polarity_label)
+    rows = []
+    total_cer = 0.0; n_with_gt = 0
+    t0 = time.perf_counter()
+    for fname, im in items:
+        try:
+            txt, _ = recognize_image(
+                im, upscale=float(upscale), force_multiline=bool(force_multiline),
+                polarity_mode=pol, use_beam=bool(use_beam),
+                beam_width=int(beam_width), lm_weight=float(lm_weight),
+                show_heatmap=False,
+            )
+        except Exception as e:
+            rows.append({"filename": fname, "prediction": f"[error: {e}]",
+                         "gt": "", "cer": ""})
+            continue
+
+        # Try to pair with a KHATT label file if this filename exists in archive/labels
+        gt = ""
+        base = os.path.splitext(fname)[0]
+        lbl = os.path.join("./archive/labels", base + ".txt")
+        if os.path.exists(lbl):
+            try:
+                gt = read_label(lbl)
+            except Exception:
+                gt = ""
+        cer_s = ""
+        if gt:
+            c = cer_raw(gt, txt)
+            total_cer += c; n_with_gt += 1
+            cer_s = f"{c:.4f}"
+        rows.append({"filename": fname, "prediction": txt, "gt": gt, "cer": cer_s})
+    elapsed = time.perf_counter() - t0
+
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False,
+                                      encoding="utf-8", newline="")
+    writer = _csv.DictWriter(tmp, delimiter="\t",
+                             fieldnames=["filename", "prediction", "gt", "cer"])
+    writer.writeheader()
+    for r in rows:
+        r["prediction"] = (r["prediction"] or "").replace("\t", " ").replace("\n", " ")
+        r["gt"] = (r["gt"] or "").replace("\t", " ").replace("\n", " ")
+        writer.writerow(r)
+    tmp.close()
+
+    summary_bits = [f"{len(rows)} samples &middot; {elapsed:.1f}s total"]
+    if n_with_gt:
+        summary_bits.append(f"avg CER {100 * total_cer / n_with_gt:.2f}% over {n_with_gt} labeled")
+    summary = ('<div style="color:#3fb950;font-family:ui-monospace,monospace;font-size:0.9em">✓ '
+               + ' &middot; '.join(summary_bits) + '</div>')
+    return tmp.name, summary
+
+
 with gr.Blocks(title="Arabic OCR — Test Bench") as demo:
     gr.Markdown(
         "## Arabic OCR — Test Bench\n"
-        "- Upload, crop, rotate, segment paragraphs, pick polarity.\n"
-        "- Optional **Ground Truth** field enables live CER / WER / DotCER scoring.\n"
-        "- **Load Random Sample** picks a KHATT test/val image so you can benchmark on known-labeled data."
+        "Single image, batch folder/ZIP, KHATT sample loader, live CER/WER, "
+        "character diff, confidence heatmap, pipeline preview, decoder comparison."
     )
-    with gr.Row():
-        editor = gr.ImageEditor(
-            label="Upload / crop image",
-            sources=["upload", "clipboard", "webcam"],
-            image_mode="RGB",
-            height=420,
-        )
-        with gr.Column():
-            with gr.Accordion("Image options", open=True):
-                use_crop = gr.Checkbox(value=True, label="Use cropped/edited image")
-                angle    = gr.Slider(-30.0, 30.0, value=0.0, step=0.5, label="Rotate (deg)")
-                upscale  = gr.Slider(1.0, 3.0, value=1.3, step=0.1, label="Upscale")
-                force_multi = gr.Checkbox(value=True, label="Auto-segment into lines")
-                polarity = gr.Radio(
-                    choices=["Auto (try both)", "Normal (black on white)", "Invert (white on black)"],
+    with gr.Tabs():
+        # =============== Single image tab ===============
+        with gr.Tab("Single"):
+            with gr.Row():
+                editor = gr.ImageEditor(
+                    label="Upload / crop image",
+                    sources=["upload", "clipboard", "webcam"],
+                    image_mode="RGB",
+                    height=420,
+                )
+                with gr.Column():
+                    with gr.Accordion("Image options", open=True):
+                        use_crop = gr.Checkbox(value=True, label="Use cropped/edited image")
+                        angle    = gr.Slider(-30.0, 30.0, value=0.0, step=0.5, label="Rotate (deg)")
+                        upscale  = gr.Slider(1.0, 3.0, value=1.3, step=0.1, label="Upscale")
+                        force_multi = gr.Checkbox(value=True, label="Auto-segment into lines")
+                        polarity = gr.Radio(
+                            choices=["Auto (try both)", "Normal (black on white)",
+                                     "Invert (white on black)"],
+                            value="Auto (try both)", label="Polarity",
+                        )
+                    with gr.Accordion("Decoder", open=True):
+                        use_beam = gr.Checkbox(value=True, label="Beam search (else greedy)")
+                        beam_width = gr.Slider(1, 30, value=10, step=1, label="Beam width")
+                        lm_weight  = gr.Slider(0.0, 1.0, value=0.3, step=0.05,
+                                               label="Bigram LM weight (0 = disabled)")
+                        show_heatmap = gr.Checkbox(value=True, label="Show confidence heatmap")
+                    with gr.Accordion("Test bench", open=True):
+                        split = gr.Radio(choices=["test", "val", "train"], value="test",
+                                         label="KHATT split")
+                        load_btn = gr.Button("Load random sample", size="sm")
+                        load_info = gr.HTML()
+                        gt_text = gr.Textbox(label="Ground truth (optional, enables CER/WER)",
+                                             lines=3, rtl=True)
+                    with gr.Row():
+                        run_btn = gr.Button("Recognize", variant="primary")
+                        compare_btn = gr.Button("Compare decoders", variant="secondary")
+                        save_btn = gr.Button("Save as PNG", variant="secondary")
+
+            with gr.Row():
+                out_text = gr.Textbox(label="Prediction (RTL)", lines=6, rtl=True)
+            metrics = gr.HTML()
+            timing  = gr.HTML()
+            diff_view = gr.HTML()
+            compare_table = gr.Markdown()
+            prev = gr.Image(label="What the model saw (preprocessed line(s) + "
+                                  "confidence heatmap)", type="pil")
+            saved_file = gr.File(label="Report PNG", visible=True)
+
+        # =============== Pipeline tab ===============
+        with gr.Tab("Pipeline"):
+            gr.Markdown("Shows each intermediate step the preprocessing pipeline applies. "
+                        "Use the same image from the Single tab (upload above first).")
+            pipe_btn = gr.Button("Show pipeline stages", variant="primary")
+            pipe_err = gr.HTML()
+            pipe_gallery = gr.Gallery(label="Pipeline", columns=2, rows=4,
+                                      object_fit="contain", height=520)
+
+        # =============== Batch tab ===============
+        with gr.Tab("Batch"):
+            gr.Markdown(
+                "Upload multiple images, or a single ZIP containing images. "
+                "If a matching KHATT label exists in `archive/labels/` for each "
+                "filename, per-sample CER and an average CER are included in the TSV."
+            )
+            with gr.Row():
+                batch_files = gr.File(label="Images or ZIP", file_count="multiple",
+                                      file_types=[".png", ".jpg", ".jpeg", ".zip"])
+            with gr.Row():
+                batch_use_beam = gr.Checkbox(value=True, label="Beam search")
+                batch_beam_w = gr.Slider(1, 30, value=10, step=1, label="Beam width")
+                batch_lm_w = gr.Slider(0.0, 1.0, value=0.3, step=0.05, label="LM weight")
+            with gr.Row():
+                batch_multi = gr.Checkbox(value=True, label="Auto-segment lines")
+                batch_pol = gr.Radio(
+                    choices=["Auto (try both)", "Normal (black on white)",
+                             "Invert (white on black)"],
                     value="Auto (try both)", label="Polarity",
                 )
-            with gr.Accordion("Decoder", open=True):
-                use_beam = gr.Checkbox(value=True, label="Beam search (else greedy)")
-                beam_width = gr.Slider(1, 30, value=10, step=1, label="Beam width")
-                lm_weight  = gr.Slider(0.0, 1.0, value=0.3, step=0.05,
-                                       label="Bigram LM weight (0 = disabled)")
-            with gr.Accordion("Test bench", open=True):
-                split = gr.Radio(choices=["test", "val", "train"], value="test", label="KHATT split")
-                load_btn = gr.Button("Load random sample", size="sm")
-                load_info = gr.HTML()
-                gt_text = gr.Textbox(label="Ground truth (optional, enables CER/WER)",
-                                     lines=3, rtl=True)
-            with gr.Row():
-                run_btn = gr.Button("Recognize", variant="primary")
-                compare_btn = gr.Button("Compare decoders", variant="secondary")
+                batch_upscale = gr.Slider(1.0, 3.0, value=1.3, step=0.1, label="Upscale")
+            batch_run = gr.Button("Run batch", variant="primary")
+            batch_status = gr.HTML()
+            batch_tsv = gr.File(label="Results TSV")
 
-    with gr.Row():
-        out_text = gr.Textbox(label="Prediction (RTL)", lines=6, rtl=True)
-    metrics = gr.HTML()
-    timing  = gr.HTML()
-    diff_view = gr.HTML(label="Character-level diff (visible when GT is set)")
-    compare_table = gr.Markdown(label="Decoder comparison")
-    prev = gr.Image(label="What the model saw (preprocessed line(s))", type="pil")
+        # =============== Examples tab ===============
+        with gr.Tab("Examples"):
+            gr.Markdown("Pre-curated KHATT samples. Click a row to load its image + GT "
+                        "into the Single tab.")
+            example_rows = get_example_list()
+            if example_rows:
+                example_df = gr.Dataframe(
+                    headers=["filename", "ground truth", "notes"],
+                    value=example_rows, wrap=True, interactive=False,
+                )
+            else:
+                gr.Markdown("_No curated samples found locally._")
+                example_df = gr.Dataframe(visible=False)
 
+    # ---- wiring ----
     run_btn.click(
         fn=infer,
         inputs=[editor, use_crop, angle, upscale, force_multi, polarity,
-                use_beam, beam_width, lm_weight, gt_text],
+                use_beam, beam_width, lm_weight, show_heatmap, gt_text],
         outputs=[out_text, prev, metrics, timing, diff_view],
     )
     compare_btn.click(
@@ -578,11 +933,50 @@ with gr.Blocks(title="Arabic OCR — Test Bench") as demo:
                 beam_width, lm_weight, gt_text],
         outputs=[compare_table],
     )
+    save_btn.click(
+        fn=save_report_cb,
+        inputs=[out_text, gt_text, prev, metrics, timing],
+        outputs=[saved_file],
+    )
     load_btn.click(
         fn=load_sample_cb,
         inputs=[split],
         outputs=[editor, gt_text, load_info],
     )
+    pipe_btn.click(
+        fn=show_pipeline_stages,
+        inputs=[editor, use_crop, angle, upscale, polarity],
+        outputs=[pipe_gallery, pipe_err],
+    )
+    batch_run.click(
+        fn=run_batch,
+        inputs=[batch_files, batch_use_beam, batch_beam_w, batch_lm_w,
+                batch_multi, batch_pol, batch_upscale],
+        outputs=[batch_tsv, batch_status],
+    )
+
+    # Click a row in Examples → load that sample into the Single tab
+    def _example_to_editor(evt: gr.SelectData):
+        if evt is None or evt.index is None:
+            return gr.update(), gr.update()
+        row_idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+        rows = get_example_list()
+        if row_idx >= len(rows):
+            return gr.update(), gr.update()
+        fname, gt, _ = rows[row_idx]
+        img_path = os.path.join(IMAGES_DIR, fname)
+        try:
+            im = Image.open(img_path).convert("RGB")
+        except Exception:
+            return gr.update(), gr.update()
+        return im, gt
+
+    if example_rows:
+        example_df.select(
+            fn=_example_to_editor,
+            inputs=None,
+            outputs=[editor, gt_text],
+        )
 
 
 if __name__ == "__main__":
