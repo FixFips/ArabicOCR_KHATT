@@ -369,7 +369,6 @@ with gr.Blocks(title="Arabic OCR — Test Bench") as demo:
             sources=["upload", "clipboard", "webcam"],
             image_mode="RGB",
             height=420,
-            show_download_button=False,
             show_share_button=False,
         )
         with gr.Column():
