@@ -38,7 +38,6 @@ PATIENCE   = 15       # early stopping patience (epochs without CER improvement)
 CHARSET_PATH = "./src/charset_arabic.txt"
 
 SHOW_SAMPLES_PRINT = 5
-SHOW_SAMPLES_FILE  = 200
 
 LOG_FILE  = os.path.join(RUN_DIR, "metrics.csv")
 CKPT_PATH = os.path.join(RUN_DIR, "crnn_best.pt")
@@ -247,8 +246,7 @@ def main():
                         print(f"GT: {r_disp}")
                         print(f"PR: {h_disp}\n")
                         shown += 1
-                    if len(samples_to_save) < SHOW_SAMPLES_FILE:
-                        samples_to_save.append((r, h))
+                    samples_to_save.append((r, h))
 
         if samples_to_save:
             tsv_path = os.path.join(RUN_DIR, f"val_epoch_{epoch:03d}_samples.tsv")
