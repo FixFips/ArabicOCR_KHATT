@@ -13,7 +13,12 @@ Usage:
 import argparse
 import csv
 import os
+import sys
 from collections import Counter
+
+# Windows console defaults to cp1252 and chokes on Arabic. Force UTF-8 stdout.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from rapidfuzz.distance import Levenshtein as _Lev
 
