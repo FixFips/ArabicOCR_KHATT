@@ -10,6 +10,7 @@ import os
 import re
 import time
 import argparse
+import tempfile
 import unicodedata as ud
 from pathlib import Path
 
@@ -66,11 +67,30 @@ def main():
     parser.add_argument("--split", default="val", choices=["val", "test", "train"])
     parser.add_argument("--ckpt", default=CKPT_PATH)
     parser.add_argument("--out", default=None, help="TSV output path (default: RUN_DIR/eval_<split>_samples.tsv)")
+    parser.add_argument("--exclude", default=None,
+                        help="TSV with a 'filename' column (e.g. runs/exp1/val_suspects.tsv) whose rows to skip")
     args = parser.parse_args()
 
     csv_path = Path(SPLITS_DIR, f"{args.split}.csv")
     if not csv_path.exists():
         raise FileNotFoundError(f"Split CSV not found: {csv_path}. Run training once to build splits.")
+
+    # If --exclude is set, write a filtered split CSV to a temp file and use it
+    tmp_csv = None
+    if args.exclude:
+        excl_df = pd.read_csv(args.exclude, sep="\t")
+        if "filename" not in excl_df.columns:
+            raise SystemExit(f"--exclude TSV has no 'filename' column: {args.exclude}")
+        bad = set(excl_df["filename"].astype(str))
+        split_df = pd.read_csv(csv_path)
+        before = len(split_df)
+        split_df = split_df[~split_df["filename"].isin(bad)].reset_index(drop=True)
+        dropped = before - len(split_df)
+        print(f"--exclude: dropped {dropped} / {before} samples from {args.split} split")
+        tmp_csv = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8")
+        split_df.to_csv(tmp_csv.name, index=False)
+        tmp_csv.close()
+        csv_path = Path(tmp_csv.name)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}{' ' + torch.cuda.get_device_name(0) if device.type == 'cuda' else ''}")
@@ -140,6 +160,12 @@ def main():
     print(f"DotCER  = {mdot:.4f}")
     print(f"Samples = {len(samples_to_save)}  |  Time = {elapsed:.1f}s")
     print(f"Saved TSV: {out_path}")
+
+    if tmp_csv is not None:
+        try:
+            os.unlink(tmp_csv.name)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
