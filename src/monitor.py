@@ -578,8 +578,10 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 if reader.fieldnames:
                     reader.fieldnames = [n.strip() for n in reader.fieldnames]
                 for row in reader:
-                    # Normalize keys: strip whitespace from values too
-                    row = {k.strip(): v.strip() if isinstance(v, str) else v for k, v in row.items()}
+                    # Normalize keys: strip whitespace from values too.
+                    # Skip None keys (restkey from DictReader when a row has more fields than the header).
+                    row = {k.strip(): v.strip() if isinstance(v, str) else v
+                           for k, v in row.items() if isinstance(k, str)}
                     try:
                         rows.append({
                             "epoch": int(float(row.get("epoch", 0))),
