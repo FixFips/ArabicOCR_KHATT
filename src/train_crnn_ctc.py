@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+import sys
 import math
 import tempfile
 import unicodedata as ud
@@ -9,6 +10,10 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from pathlib import Path
+
+# Windows console defaults to cp1252 and crashes when printing Arabic sample lines.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 import torch
 import torch.nn as nn
