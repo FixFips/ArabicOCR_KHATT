@@ -1,4 +1,5 @@
 # src/webocr.py
+import html as _html
 import os
 import random
 import time
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 import cv2
 from PIL import Image, ImageOps
+from rapidfuzz.distance import Levenshtein as _Lev
 
 import torch
 from torchvision import transforms
@@ -326,15 +328,97 @@ def _fmt_metrics(gt: str, pred: str) -> str:
             f'WER {w:.2f}% &nbsp; DotCER {d:.2f}%</div>')
 
 
+_DIFF_CSS = """
+<style>
+  .diff-wrap { direction:rtl; text-align:right; font-size:1.35em; line-height:1.8;
+               font-family:'Geeza Pro','Arabic Typesetting','Segoe UI',sans-serif;
+               background:#0d1117; color:#e6edf3; padding:12px 14px;
+               border:1px solid #30363d; border-radius:8px; margin-top:6px; }
+  .diff-wrap .row { padding:2px 0; }
+  .diff-wrap .lab { direction:ltr; display:inline-block; font-family:ui-monospace,monospace;
+                     font-size:0.55em; color:#8b949e; background:#21262d;
+                     border-radius:3px; padding:2px 6px; margin-inline-end:8px;
+                     vertical-align:middle; }
+  .diff-wrap .eq { }
+  .diff-wrap .sub { background:rgba(210,153,34,0.30); color:#d29922;
+                     border-radius:3px; padding:0 2px; }
+  .diff-wrap .del { background:rgba(248,81,73,0.30); color:#f85149;
+                     border-radius:3px; padding:0 2px; text-decoration:line-through; }
+  .diff-wrap .ins { background:rgba(248,81,73,0.30); color:#f85149;
+                     border-radius:3px; padding:0 2px; }
+  .diff-wrap .legend { direction:ltr; text-align:left; font-size:0.55em;
+                        color:#8b949e; margin-top:8px; font-family:ui-monospace,monospace; }
+</style>
+"""
+
+
+def _char_html(ch: str, cls: str) -> str:
+    """Escape and wrap a single char. Render space as a visible middle-dot when not equal."""
+    esc = _html.escape(ch) if ch != " " else "&nbsp;"
+    return f'<span class="{cls}">{esc}</span>'
+
+
+def _diff_html(gt: str, pred: str) -> str:
+    """Character-aligned diff of GT vs PR — green=equal, yellow=sub, red=del/ins."""
+    if not gt.strip():
+        return ""
+
+    ops = _Lev.editops(gt, pred)
+    gi = pi = 0
+    gt_spans: List[str] = []
+    pr_spans: List[str] = []
+
+    for tag, i1, i2 in ops:
+        # Equal run before this op — by editops invariant, both advance in lockstep.
+        while gi < i1 and pi < i2:
+            gt_spans.append(_char_html(gt[gi], "eq"))
+            pr_spans.append(_char_html(pred[pi], "eq"))
+            gi += 1; pi += 1
+        if tag == "replace":
+            gt_spans.append(_char_html(gt[i1], "sub"))
+            pr_spans.append(_char_html(pred[i2], "sub"))
+            gi += 1; pi += 1
+        elif tag == "delete":
+            gt_spans.append(_char_html(gt[i1], "del"))
+            gi += 1
+        elif tag == "insert":
+            pr_spans.append(_char_html(pred[i2], "ins"))
+            pi += 1
+
+    # Trailing equal tail
+    while gi < len(gt) and pi < len(pred):
+        gt_spans.append(_char_html(gt[gi], "eq"))
+        pr_spans.append(_char_html(pred[pi], "eq"))
+        gi += 1; pi += 1
+    while gi < len(gt):
+        gt_spans.append(_char_html(gt[gi], "del"))
+        gi += 1
+    while pi < len(pred):
+        pr_spans.append(_char_html(pred[pi], "ins"))
+        pi += 1
+
+    return (
+        _DIFF_CSS
+        + '<div class="diff-wrap">'
+        + f'<div class="row"><span class="lab">GT</span>{"".join(gt_spans)}</div>'
+        + f'<div class="row"><span class="lab">PR</span>{"".join(pr_spans)}</div>'
+        + '<div class="legend">'
+          'green = match &middot; '
+          '<span style="color:#d29922">yellow = substitution</span> &middot; '
+          '<span style="color:#f85149">red = deletion/insertion</span></div>'
+        + '</div>'
+    )
+
+
 def infer(editor_payload: Any, use_cropped: bool, angle: float, upscale: float,
           force_multiline: bool, polarity_label: str, use_beam: bool,
           beam_width: int, lm_weight: float, gt_text: str):
     if editor_payload is None:
-        return "", None, "", ""
+        return "", None, "", "", ""
     try:
         pil = ensure_pil_from_editor(editor_payload, use_cropped=use_cropped)
     except Exception as e:
-        return f"Unsupported image format ({type(editor_payload)}): {e}", None, "", ""
+        return f"Unsupported image format ({type(editor_payload)}): {e}", None, "", "", ""
 
     pil = rotate_if_needed(pil, angle)
     mode = _map_polarity(polarity_label)
@@ -347,7 +431,86 @@ def infer(editor_payload: Any, use_cropped: bool, angle: float, upscale: float,
     elapsed_ms = (time.perf_counter() - t0) * 1000
     info = f'<span style="color:#8b949e">decoded in {elapsed_ms:.0f} ms &middot; device={device.type}</span>'
     metrics_html = _fmt_metrics(gt_text or "", txt)
-    return txt, prev, metrics_html, info
+    diff_html = _diff_html(gt_text or "", txt)
+    return txt, prev, metrics_html, info, diff_html
+
+
+# ---------------- Decoder comparison ----------------
+def _decode_with(prepped_lines: List[Image.Image], use_beam: bool,
+                 beam_width: int, lm_weight: float) -> str:
+    texts = []
+    for img in prepped_lines:
+        texts.append(_decode_one(img, device, id2char,
+                                 use_beam=use_beam,
+                                 beam_width=beam_width,
+                                 lm_weight=lm_weight))
+    return "\n".join(texts)
+
+
+@torch.inference_mode()
+def compare_decoders(editor_payload: Any, use_cropped: bool, angle: float, upscale: float,
+                     force_multiline: bool, polarity_label: str,
+                     beam_width: int, lm_weight: float, gt_text: str):
+    if editor_payload is None:
+        return "_upload an image first_"
+    try:
+        pil = ensure_pil_from_editor(editor_payload, use_cropped=use_cropped)
+    except Exception as e:
+        return f"unsupported image: {e}"
+
+    pil = rotate_if_needed(pil, angle)
+    mode = _map_polarity(polarity_label)
+    lines = segment_into_lines(pil) if force_multiline else [pil]
+
+    # Prep once per line using the greedy-longer-polarity pick (stable choice)
+    prepped: List[Image.Image] = []
+    for ln in lines:
+        if mode == "normal":
+            prepped.append(prep_line(ln, upscale=upscale, force_invert=False))
+        elif mode == "invert":
+            prepped.append(prep_line(ln, upscale=upscale, force_invert=True))
+        else:
+            pn = prep_line(ln, upscale=upscale, force_invert=False)
+            pi = prep_line(ln, upscale=upscale, force_invert=True)
+            tn = _decode_one(pn, device, id2char, use_beam=False)
+            ti = _decode_one(pi, device, id2char, use_beam=False)
+            prepped.append(pi if len(ti.strip()) > len(tn.strip()) else pn)
+
+    configs = [
+        ("greedy", dict(use_beam=False, beam_width=1, lm_weight=0.0)),
+        (f"beam({int(beam_width)})",
+            dict(use_beam=True, beam_width=int(beam_width), lm_weight=0.0)),
+        (f"beam({int(beam_width)})+lm({float(lm_weight):.2f})",
+            dict(use_beam=True, beam_width=int(beam_width), lm_weight=float(lm_weight))),
+    ]
+
+    rows = []
+    best_cer = None
+    gt = (gt_text or "").strip()
+    for name, kw in configs:
+        t0 = time.perf_counter()
+        txt = _decode_with(prepped, **kw)
+        ms = (time.perf_counter() - t0) * 1000
+        if gt:
+            c = cer_raw(gt, txt) * 100
+            best_cer = c if best_cer is None else min(best_cer, c)
+            rows.append((name, txt, c, ms))
+        else:
+            rows.append((name, txt, None, ms))
+
+    # Markdown table with RTL-safe prediction cells
+    header = "| Config | Prediction | CER | Time |\n|---|---|---|---|\n"
+    body_lines = []
+    for name, txt, c, ms in rows:
+        safe = txt.replace("|", "\\|").replace("\n", " ⏎ ")
+        pred_cell = f'<span style="direction:rtl; unicode-bidi:embed">{safe}</span>'
+        if c is None:
+            cer_cell = "—"
+        else:
+            mark = " ⭐" if c == best_cer else ""
+            cer_cell = f"{c:.2f}%{mark}"
+        body_lines.append(f"| `{name}` | {pred_cell} | {cer_cell} | {ms:.0f} ms |")
+    return header + "\n".join(body_lines)
 
 
 def load_sample_cb(split: str):
@@ -391,19 +554,29 @@ with gr.Blocks(title="Arabic OCR — Test Bench") as demo:
                 load_info = gr.HTML()
                 gt_text = gr.Textbox(label="Ground truth (optional, enables CER/WER)",
                                      lines=3, rtl=True)
-            run_btn = gr.Button("Recognize", variant="primary")
+            with gr.Row():
+                run_btn = gr.Button("Recognize", variant="primary")
+                compare_btn = gr.Button("Compare decoders", variant="secondary")
 
     with gr.Row():
         out_text = gr.Textbox(label="Prediction (RTL)", lines=6, rtl=True)
     metrics = gr.HTML()
     timing  = gr.HTML()
+    diff_view = gr.HTML(label="Character-level diff (visible when GT is set)")
+    compare_table = gr.Markdown(label="Decoder comparison")
     prev = gr.Image(label="What the model saw (preprocessed line(s))", type="pil")
 
     run_btn.click(
         fn=infer,
         inputs=[editor, use_crop, angle, upscale, force_multi, polarity,
                 use_beam, beam_width, lm_weight, gt_text],
-        outputs=[out_text, prev, metrics, timing],
+        outputs=[out_text, prev, metrics, timing, diff_view],
+    )
+    compare_btn.click(
+        fn=compare_decoders,
+        inputs=[editor, use_crop, angle, upscale, force_multi, polarity,
+                beam_width, lm_weight, gt_text],
+        outputs=[compare_table],
     )
     load_btn.click(
         fn=load_sample_cb,
