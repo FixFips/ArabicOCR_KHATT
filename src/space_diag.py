@@ -57,11 +57,12 @@ def main():
     deleted_total = 0
     inserted_total = 0
     context_counts = Counter()
-    per_line = []  # (deletions, gt, pr)
+    per_line = []  # (deletions, filename, gt, pr, cer)
 
     with open(args.tsv, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
+            fn = row.get("filename", "")
             gt = row.get("label", "")
             pr = row.get("pred", "")
             g_sp = gt.count(" ")
@@ -83,7 +84,8 @@ def main():
                     deleted_total += 1
                     line_dels += 1
                     context_counts[classify_deletion(gt, i1)] += 1
-            per_line.append((line_dels, gt, pr))
+            line_cer = _Lev.distance(gt, pr) / max(len(gt), 1)
+            per_line.append((line_dels, fn, gt, pr, line_cer))
 
     n_lines = len(per_line)
     print(f"Val lines       : {n_lines}")
@@ -99,16 +101,25 @@ def main():
         pct = 100 * n / max(deleted_total, 1)
         print(f"  {ctx:12s}: {n:5d}  ({pct:4.1f}%)")
 
+    def _fmt(s):
+        return s if len(s) <= 120 else s[:120] + "..."
+
     print(f"\nTop {args.top} lines with most space deletions:")
-    per_line.sort(reverse=True, key=lambda x: x[0])
-    for i, (n, gt, pr) in enumerate(per_line[: args.top], 1):
+    by_dels = sorted(per_line, reverse=True, key=lambda x: x[0])
+    for i, (n, fn, gt, pr, c) in enumerate(by_dels[: args.top], 1):
         if n == 0:
             break
-        gt_show = gt if len(gt) <= 120 else gt[:120] + "..."
-        pr_show = pr if len(pr) <= 120 else pr[:120] + "..."
-        print(f"\n[{i}] deleted={n}")
-        print(f"  GT: {gt_show}")
-        print(f"  PR: {pr_show}")
+        print(f"\n[{i}] deleted={n}  cer={c:.2f}  file={fn}")
+        print(f"  GT: {_fmt(gt)}")
+        print(f"  PR: {_fmt(pr)}")
+
+    # Lines with very high CER are likely misalignments, not space errors.
+    print(f"\nTop {args.top} highest-CER lines (possible misalignment):")
+    by_cer = sorted(per_line, reverse=True, key=lambda x: x[4])
+    for i, (n, fn, gt, pr, c) in enumerate(by_cer[: args.top], 1):
+        print(f"\n[{i}] cer={c:.2f}  deleted={n}  file={fn}")
+        print(f"  GT: {_fmt(gt)}")
+        print(f"  PR: {_fmt(pr)}")
 
 
 if __name__ == "__main__":

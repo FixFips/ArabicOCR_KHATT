@@ -14,6 +14,7 @@ import unicodedata as ud
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -90,6 +91,7 @@ def main():
     collate = CRNNCollate(char2id, unk_id)
     loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2,
                         pin_memory=True, collate_fn=collate)
+    filenames = pd.read_csv(csv_path)["filename"].tolist()
     print(f"Split: {args.split}  ({len(ds)} samples, {len(loader)} batches)")
 
     vcer = []; vwer = []; vwer_norm = []
@@ -123,10 +125,13 @@ def main():
 
     default_name = "val_epoch_999_samples.tsv" if args.split == "val" else f"eval_{args.split}_samples.tsv"
     out_path = args.out or os.path.join(RUN_DIR, default_name)
+    if len(filenames) != len(samples_to_save):
+        print(f"WARN: filename count ({len(filenames)}) != sample count ({len(samples_to_save)}); omitting filenames")
+        filenames = [""] * len(samples_to_save)
     with open(out_path, "w", encoding="utf-8") as fo:
-        fo.write("label\tpred\n")
-        for r, h in samples_to_save:
-            fo.write(f"{r.replace(chr(9),' ').replace(chr(10),' ')}\t{h.replace(chr(9),' ').replace(chr(10),' ')}\n")
+        fo.write("filename\tlabel\tpred\n")
+        for fn, (r, h) in zip(filenames, samples_to_save):
+            fo.write(f"{fn}\t{r.replace(chr(9),' ').replace(chr(10),' ')}\t{h.replace(chr(9),' ').replace(chr(10),' ')}\n")
 
     print("")
     print(f"CER     = {mcer:.4f}")
