@@ -121,7 +121,8 @@ def main():
     mdot   = dot_group_cer(all_refs, all_hyps)
     elapsed = time.perf_counter() - t0
 
-    out_path = args.out or os.path.join(RUN_DIR, f"eval_{args.split}_samples.tsv")
+    default_name = "val_epoch_999_samples.tsv" if args.split == "val" else f"eval_{args.split}_samples.tsv"
+    out_path = args.out or os.path.join(RUN_DIR, default_name)
     with open(out_path, "w", encoding="utf-8") as fo:
         fo.write("label\tpred\n")
         for r, h in samples_to_save:
