@@ -1,8 +1,12 @@
 # src/webocr.py
 import os
-from typing import Any, List, Tuple
+import random
+import time
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import cv2
 from PIL import Image, ImageOps
 
@@ -10,7 +14,9 @@ import torch
 from torchvision import transforms
 import gradio as gr
 
-from .model import CRNN, ctc_greedy_decode, ctc_beam_decode
+from .dataset import read_label
+from .metrics import cer as cer_raw, wer as wer_raw, dot_group_cer
+from .model import CRNN, ctc_greedy_decode, ctc_beam_decode, build_bigram_lm
 from .preprocess import to_grayscale, binarize, normalize, resize_keep_ratio_height, pad_width
 
 
@@ -18,6 +24,8 @@ from .preprocess import to_grayscale, binarize, normalize, resize_keep_ratio_hei
 HEIGHT = 96
 MAX_W  = 1536
 CKPT   = "./runs/exp1/crnn_best.pt"
+SPLITS_DIR  = "./archive/splits"
+IMAGES_DIR  = "./archive/images"
 
 
 # ---------------- Checkpoint / charset helpers ----------------
@@ -187,18 +195,67 @@ def rotate_if_needed(pil: Image.Image, angle_deg: float) -> Image.Image:
 # ---------------- Model init ----------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 vocab, id2char, state_dict = load_vocab_from_ckpt(CKPT)
+char2id = {c: i for i, c in enumerate(vocab)}
 model = CRNN(num_classes=len(vocab)).to(device)
 model.load_state_dict(state_dict)
 model.eval()
 to_tensor = transforms.ToTensor()
 
 
+# ---------------- Optional bigram LM for beam search ----------------
+_bigram_lm: Optional[dict] = None
+def get_bigram_lm():
+    """Lazy-build the bigram LM from the training split on first use."""
+    global _bigram_lm
+    if _bigram_lm is not None:
+        return _bigram_lm
+    train_csv = Path(SPLITS_DIR, "train.csv")
+    if not train_csv.exists():
+        return None
+    df = pd.read_csv(train_csv)
+    texts = []
+    for _, row in df.iterrows():
+        try:
+            texts.append(read_label(row["label_path"]))
+        except Exception:
+            pass
+    _bigram_lm = build_bigram_lm(texts, char2id)
+    return _bigram_lm
+
+
+# ---------------- Sample loader (KHATT test/val) ----------------
+def load_random_sample(split: str = "test") -> Tuple[Optional[Image.Image], str, str]:
+    csv_path = Path(SPLITS_DIR, f"{split}.csv")
+    if not csv_path.exists():
+        return None, "", f"split not found: {csv_path}"
+    df = pd.read_csv(csv_path)
+    if not len(df):
+        return None, "", "split is empty"
+    row = df.sample(1).iloc[0]
+    img_path = os.path.join(IMAGES_DIR, row["filename"])
+    try:
+        img = Image.open(img_path).convert("RGB")
+    except Exception as e:
+        return None, "", f"cannot open {img_path}: {e}"
+    try:
+        gt = read_label(row["label_path"])
+    except Exception:
+        gt = ""
+    return img, gt, f"{split}: {row['filename']}"
+
+
 # ---------------- Decode helpers ----------------
-def _decode_one(im_pil: Image.Image, device: torch.device, id2char, use_beam: bool = False) -> str:
+def _decode_one(im_pil: Image.Image, device: torch.device, id2char,
+                use_beam: bool = False, beam_width: int = 10,
+                lm_weight: float = 0.0) -> str:
     x = to_tensor(im_pil).unsqueeze(0).to(device)
     logits = model(x)
     if use_beam:
-        hyp_ltr = ctc_beam_decode(logits, id2char, beam_width=10)[0]
+        lm = get_bigram_lm() if lm_weight > 0 else None
+        hyp_ltr = ctc_beam_decode(logits, id2char,
+                                  beam_width=beam_width,
+                                  bigram_lm=lm,
+                                  lm_weight=lm_weight)[0]
     else:
         hyp_ltr = ctc_greedy_decode(logits, id2char)[0]
     return hyp_ltr[::-1]  # back to RTL
@@ -211,30 +268,33 @@ def recognize_image(
     force_multiline: bool = True,
     polarity_mode: str = "auto",
     use_beam: bool = False,
+    beam_width: int = 10,
+    lm_weight: float = 0.0,
 ) -> Tuple[str, Image.Image]:
     lines = segment_into_lines(pil_img) if force_multiline else [pil_img]
 
     selected_prepped: List[Image.Image] = []
     texts: List[str] = []
 
+    def _dec(img):
+        return _decode_one(img, device, id2char,
+                           use_beam=use_beam, beam_width=beam_width,
+                           lm_weight=lm_weight)
+
     for ln in lines:
         if polarity_mode == "normal":
             prep_n = prep_line(ln, upscale=upscale, force_invert=False)
-            txt_n = _decode_one(prep_n, device, id2char, use_beam=use_beam)
-            prep_best, txt_best = prep_n, txt_n
+            prep_best, txt_best = prep_n, _dec(prep_n)
 
         elif polarity_mode == "invert":
             prep_i = prep_line(ln, upscale=upscale, force_invert=True)
-            txt_i = _decode_one(prep_i, device, id2char, use_beam=use_beam)
-            prep_best, txt_best = prep_i, txt_i
+            prep_best, txt_best = prep_i, _dec(prep_i)
 
         else:  # auto: try both, choose longer non-blank
             prep_n = prep_line(ln, upscale=upscale, force_invert=False)
-            txt_n = _decode_one(prep_n, device, id2char, use_beam=use_beam)
-
+            txt_n = _dec(prep_n)
             prep_i = prep_line(ln, upscale=upscale, force_invert=True)
-            txt_i = _decode_one(prep_i, device, id2char, use_beam=use_beam)
-
+            txt_i = _dec(prep_i)
             if len(txt_i.strip()) > len(txt_n.strip()):
                 prep_best, txt_best = prep_i, txt_i
             else:
@@ -253,58 +313,104 @@ def _map_polarity(label: str) -> str:
     if label.startswith("Invert"): return "invert"
     return "auto"
 
+
+def _fmt_metrics(gt: str, pred: str) -> str:
+    if not gt.strip():
+        return ""
+    c = cer_raw(gt, pred) * 100
+    w = wer_raw(gt, pred) * 100
+    d = dot_group_cer([gt], [pred]) * 100
+    color = "#3fb950" if c < 10 else "#d29922" if c < 25 else "#f85149"
+    return (f'<div style="font-family:ui-monospace,monospace;font-size:0.95em">'
+            f'<span style="color:{color}"><b>CER {c:.2f}%</b></span> &nbsp; '
+            f'WER {w:.2f}% &nbsp; DotCER {d:.2f}%</div>')
+
+
 def infer(editor_payload: Any, use_cropped: bool, angle: float, upscale: float,
-          force_multiline: bool, polarity_label: str, use_beam: bool):
+          force_multiline: bool, polarity_label: str, use_beam: bool,
+          beam_width: int, lm_weight: float, gt_text: str):
     if editor_payload is None:
-        return "", None
+        return "", None, "", ""
     try:
         pil = ensure_pil_from_editor(editor_payload, use_cropped=use_cropped)
     except Exception as e:
-        return f"Unsupported image format ({type(editor_payload)}): {e}", None
+        return f"Unsupported image format ({type(editor_payload)}): {e}", None, "", ""
 
     pil = rotate_if_needed(pil, angle)
     mode = _map_polarity(polarity_label)
-    txt, prev = recognize_image(pil, upscale=upscale, force_multiline=force_multiline,
-                                polarity_mode=mode, use_beam=use_beam)
-    return txt, prev
+    t0 = time.perf_counter()
+    txt, prev = recognize_image(
+        pil, upscale=upscale, force_multiline=force_multiline,
+        polarity_mode=mode, use_beam=use_beam,
+        beam_width=int(beam_width), lm_weight=float(lm_weight),
+    )
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    info = f'<span style="color:#8b949e">decoded in {elapsed_ms:.0f} ms &middot; device={device.type}</span>'
+    metrics_html = _fmt_metrics(gt_text or "", txt)
+    return txt, prev, metrics_html, info
 
 
-with gr.Blocks(title="Arabic OCR — Upload / Crop / Recognize") as demo:
+def load_sample_cb(split: str):
+    img, gt, info = load_random_sample(split)
+    # Gradio ImageEditor accepts None or a dict-like; passing a PIL directly works for upload display.
+    return img, gt, f'<span style="color:#8b949e">loaded: {info}</span>'
+
+
+with gr.Blocks(title="Arabic OCR — Test Bench") as demo:
     gr.Markdown(
-        "## Arabic OCR — Upload / Crop / Recognize\n"
-        "- Uses **CLAHE + dual-polarity Otsu** preprocessing (same as training).\n"
-        "- Multi-scale vertical encoding preserves Arabic dot positions.\n"
-        "- You can **crop**, **rotate**, **upscale** small text, **auto-split** paragraphs, "
-        "and pick **polarity** (Auto / Normal / Invert)."
+        "## Arabic OCR — Test Bench\n"
+        "- Upload, crop, rotate, segment paragraphs, pick polarity.\n"
+        "- Optional **Ground Truth** field enables live CER / WER / DotCER scoring.\n"
+        "- **Load Random Sample** picks a KHATT test/val image so you can benchmark on known-labeled data."
     )
     with gr.Row():
         editor = gr.ImageEditor(
-            label="Upload & (optional) crop selection",
+            label="Upload / crop image",
             sources=["upload", "clipboard", "webcam"],
             image_mode="RGB",
-            height=480,
+            height=420,
             show_download_button=False,
             show_share_button=False,
         )
         with gr.Column():
-            use_crop = gr.Checkbox(value=True, label="Use cropped/edited image (uncheck = use original/background)")
-            angle    = gr.Slider(-30.0, 30.0, value=0.0, step=0.5, label="Rotate (degrees)")
-            upscale  = gr.Slider(1.0, 3.0, value=1.3, step=0.1, label="Upscale before OCR (helps tiny text)")
-            force_multi = gr.Checkbox(value=True, label="Auto-segment into lines (paragraphs)")
-            polarity = gr.Radio(
-                choices=["Auto (try both)", "Normal (black on white)", "Invert (white on black)"],
-                value="Auto (try both)",
-                label="Polarity"
-            )
-            use_beam = gr.Checkbox(value=True, label="Use beam search (slower but more accurate)")
+            with gr.Accordion("Image options", open=True):
+                use_crop = gr.Checkbox(value=True, label="Use cropped/edited image")
+                angle    = gr.Slider(-30.0, 30.0, value=0.0, step=0.5, label="Rotate (deg)")
+                upscale  = gr.Slider(1.0, 3.0, value=1.3, step=0.1, label="Upscale")
+                force_multi = gr.Checkbox(value=True, label="Auto-segment into lines")
+                polarity = gr.Radio(
+                    choices=["Auto (try both)", "Normal (black on white)", "Invert (white on black)"],
+                    value="Auto (try both)", label="Polarity",
+                )
+            with gr.Accordion("Decoder", open=True):
+                use_beam = gr.Checkbox(value=True, label="Beam search (else greedy)")
+                beam_width = gr.Slider(1, 30, value=10, step=1, label="Beam width")
+                lm_weight  = gr.Slider(0.0, 1.0, value=0.3, step=0.05,
+                                       label="Bigram LM weight (0 = disabled)")
+            with gr.Accordion("Test bench", open=True):
+                split = gr.Radio(choices=["test", "val", "train"], value="test", label="KHATT split")
+                load_btn = gr.Button("Load random sample", size="sm")
+                load_info = gr.HTML()
+                gt_text = gr.Textbox(label="Ground truth (optional, enables CER/WER)",
+                                     lines=3, rtl=True)
             run_btn = gr.Button("Recognize", variant="primary")
-            out_text = gr.Textbox(label="Prediction (RTL)", lines=8, show_copy_button=True)
+
+    with gr.Row():
+        out_text = gr.Textbox(label="Prediction (RTL)", lines=6, show_copy_button=True, rtl=True)
+    metrics = gr.HTML()
+    timing  = gr.HTML()
     prev = gr.Image(label="What the model saw (preprocessed line(s))", type="pil")
 
     run_btn.click(
         fn=infer,
-        inputs=[editor, use_crop, angle, upscale, force_multi, polarity, use_beam],
-        outputs=[out_text, prev]
+        inputs=[editor, use_crop, angle, upscale, force_multi, polarity,
+                use_beam, beam_width, lm_weight, gt_text],
+        outputs=[out_text, prev, metrics, timing],
+    )
+    load_btn.click(
+        fn=load_sample_cb,
+        inputs=[split],
+        outputs=[editor, gt_text, load_info],
     )
 
 
