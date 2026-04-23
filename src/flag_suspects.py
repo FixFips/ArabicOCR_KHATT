@@ -65,9 +65,9 @@ def main():
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
             total += 1
-            fn = row.get("filename", "")
-            gt = row.get("label", "")
-            pr = row.get("pred", "")
+            fn = row.get("filename") or ""
+            gt = row.get("label") or ""
+            pr = row.get("pred") or ""
 
             img_path = os.path.join(args.images, fn) if fn else ""
             if not fn or not os.path.exists(img_path):
