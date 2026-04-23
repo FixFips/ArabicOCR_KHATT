@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from .dataset import KHATTDataset
-from .metrics import cer as cer_raw, wer as wer_raw, dot_group_cer
+from .metrics import cer as cer_raw, cer_norm as cer_n_fn, wer as wer_raw, dot_group_cer
 from .model import CRNN, text_to_ids, ids_to_text, ctc_greedy_decode
 
 IMAGES_DIR = "./archive/images"
@@ -114,7 +114,7 @@ def main():
     filenames = pd.read_csv(csv_path)["filename"].tolist()
     print(f"Split: {args.split}  ({len(ds)} samples, {len(loader)} batches)")
 
-    vcer = []; vwer = []; vwer_norm = []
+    vcer = []; vcer_n = []; vwer = []; vwer_norm = []
     all_refs = []; all_hyps = []
     samples_to_save = []
 
@@ -128,6 +128,7 @@ def main():
 
             for r, h in zip(texts_ref, hyps_rtl):
                 vcer.append(cer_raw(r, h))
+                vcer_n.append(cer_n_fn(r, h))
                 vwer.append(wer_raw(r, h))
                 all_refs.append(r); all_hyps.append(h)
                 samples_to_save.append((r, h))
@@ -137,10 +138,11 @@ def main():
             for r, h in zip(refs_n, hyps_n):
                 vwer_norm.append(wer_raw(r, h))
 
-    mcer   = float(np.mean(vcer)) if vcer else 1.0
-    mwer   = float(np.mean(vwer)) if vwer else 1.0
-    mwer_n = float(np.mean(vwer_norm)) if vwer_norm else 1.0
-    mdot   = dot_group_cer(all_refs, all_hyps)
+    mcer    = float(np.mean(vcer)) if vcer else 1.0
+    mcer_n  = float(np.mean(vcer_n)) if vcer_n else 1.0
+    mwer    = float(np.mean(vwer)) if vwer else 1.0
+    mwer_n  = float(np.mean(vwer_norm)) if vwer_norm else 1.0
+    mdot    = dot_group_cer(all_refs, all_hyps)
     elapsed = time.perf_counter() - t0
 
     default_name = "val_epoch_999_samples.tsv" if args.split == "val" else f"eval_{args.split}_samples.tsv"
@@ -154,11 +156,12 @@ def main():
             fo.write(f"{fn}\t{r.replace(chr(9),' ').replace(chr(10),' ')}\t{h.replace(chr(9),' ').replace(chr(10),' ')}\n")
 
     print("")
-    print(f"CER     = {mcer:.4f}")
-    print(f"WER     = {mwer:.4f}")
-    print(f"WER(n)  = {mwer_n:.4f}")
-    print(f"DotCER  = {mdot:.4f}")
-    print(f"Samples = {len(samples_to_save)}  |  Time = {elapsed:.1f}s")
+    print(f"CER      = {mcer:.4f}")
+    print(f"CER(n)   = {mcer_n:.4f}   (diff = {(mcer - mcer_n)*100:+.2f} bp; Arabic ortho-normalized)")
+    print(f"WER      = {mwer:.4f}")
+    print(f"WER(n)   = {mwer_n:.4f}")
+    print(f"DotCER   = {mdot:.4f}")
+    print(f"Samples  = {len(samples_to_save)}  |  Time = {elapsed:.1f}s")
     print(f"Saved TSV: {out_path}")
 
     if tmp_csv is not None:

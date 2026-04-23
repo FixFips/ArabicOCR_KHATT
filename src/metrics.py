@@ -1,11 +1,40 @@
 # src/metrics.py
+import re
+import unicodedata as ud
 from rapidfuzz.distance import Levenshtein
+
+
+_re_diac = re.compile(r"[\u064B-\u0652]")
+
+
+def norm_ar(s: str) -> str:
+    """Collapse orthographic variants that don't change meaning/phonetics.
+
+    Applies: NFKC, strip tatweel and diacritics, fold alef-variants (أ إ آ → ا),
+    fold ى → ي, collapse whitespace. KHATT labels mix these forms (e.g. 102
+    words appear with both ى and ي forms in train), so normalizing avoids
+    penalizing the model for arbitrary scribe choices.
+    """
+    s = ud.normalize("NFKC", s)
+    s = s.replace("\u0640", "")
+    s = _re_diac.sub("", s)
+    s = (s.replace("\u0623", "\u0627")
+           .replace("\u0625", "\u0627")
+           .replace("\u0622", "\u0627")
+           .replace("\u0649", "\u064A"))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def cer(ref: str, hyp: str) -> float:
     if not ref:
         return 0.0 if not hyp else 1.0
     return Levenshtein.distance(list(ref), list(hyp)) / len(ref)
+
+
+def cer_norm(ref: str, hyp: str) -> float:
+    """CER after Arabic orthographic normalization (see norm_ar)."""
+    return cer(norm_ar(ref), norm_ar(hyp))
 
 
 def wer(ref: str, hyp: str) -> float:
