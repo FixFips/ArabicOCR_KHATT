@@ -25,6 +25,7 @@ _DOT_GROUPS_LIST = [
     {"name": "ba / ta / tha", "chars": ["\u0628", "\u062a", "\u062b"]},
     {"name": "jim / ha / kha", "chars": ["\u062c", "\u062d", "\u062e"]},
     {"name": "nun / ya", "chars": ["\u0646", "\u064a"]},
+    {"name": "fa / qaf", "chars": ["\u0641", "\u0642"]},
 ]
 
 

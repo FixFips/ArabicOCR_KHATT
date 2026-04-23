@@ -30,6 +30,9 @@ _DOT_GROUPS = {
     "\u062C",  # jim — 1 dot below
     "\u062D",  # ha  — no dot
     "\u062E",  # kha — 1 dot above
+    # fa/qaf group (same base stroke; 30 qaf→fa subs seen in v2 val analysis 2026-04-23)
+    "\u0641",  # fa  — 1 dot above
+    "\u0642",  # qaf — 2 dots above
 }
 
 
