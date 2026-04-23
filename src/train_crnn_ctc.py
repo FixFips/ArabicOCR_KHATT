@@ -1,6 +1,8 @@
+import argparse
 import os
 import re
 import math
+import tempfile
 import unicodedata as ud
 import time
 from datetime import datetime
@@ -47,6 +49,31 @@ def set_seed(seed):
     import random
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+
+
+def _load_exclude_filenames(paths):
+    """Read one or more TSVs with a 'filename' column; return the union set."""
+    bad = set()
+    for p in paths:
+        df = pd.read_csv(p, sep="\t")
+        if "filename" not in df.columns:
+            raise SystemExit(f"--exclude TSV has no 'filename' column: {p}")
+        bad.update(df["filename"].astype(str).tolist())
+    return bad
+
+
+def _filter_split_csv(src_csv: str, bad_filenames: set) -> str:
+    """Write a filtered copy of src_csv (rows whose filename is in bad_filenames removed).
+    Returns path to a temp CSV file."""
+    df = pd.read_csv(src_csv)
+    before = len(df)
+    df = df[~df["filename"].isin(bad_filenames)].reset_index(drop=True)
+    dropped = before - len(df)
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8")
+    df.to_csv(tmp.name, index=False)
+    tmp.close()
+    print(f"  {os.path.basename(src_csv)}: dropped {dropped} / {before}")
+    return tmp.name
 
 def build_splits():
     rows = []
@@ -129,11 +156,29 @@ class CRNNCollate:
 
 # ------------- Train -------------
 def main():
+    parser = argparse.ArgumentParser(description="Train Arabic CRNN-CTC on KHATT")
+    parser.add_argument("--exclude", action="append", default=[],
+                        help="TSV with 'filename' column; rows are dropped from all splits. Repeatable.")
+    args = parser.parse_args()
+
     os.makedirs(RUN_DIR, exist_ok=True)
     _init_metrics_file()
     set_seed(SEED)
     if not Path(SPLITS_DIR, "train.csv").exists():
         build_splits()
+
+    # Resolve split CSV paths, filtering if --exclude was given
+    train_csv = Path(SPLITS_DIR, "train.csv")
+    val_csv   = Path(SPLITS_DIR, "val.csv")
+    test_csv  = Path(SPLITS_DIR, "test.csv")
+    tmp_csvs = []
+    if args.exclude:
+        bad = _load_exclude_filenames(args.exclude)
+        print(f"Excluding {len(bad)} filenames from all splits (from {len(args.exclude)} TSV(s)):")
+        train_csv = Path(_filter_split_csv(str(train_csv), bad)); tmp_csvs.append(train_csv)
+        val_csv   = Path(_filter_split_csv(str(val_csv),   bad)); tmp_csvs.append(val_csv)
+        if test_csv.exists():
+            test_csv = Path(_filter_split_csv(str(test_csv), bad)); tmp_csvs.append(test_csv)
 
     vocab, char2id, id2char, unk_id = load_charset(CHARSET_PATH)
     num_classes = len(vocab)
@@ -143,11 +188,11 @@ def main():
     aug = ArabicAugment(training=True)
 
     train_ds = KHATTDataset(
-        Path(SPLITS_DIR, "train.csv"), IMAGES_DIR,
+        train_csv, IMAGES_DIR,
         mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W, augment=aug,
     )
     val_ds = KHATTDataset(
-        Path(SPLITS_DIR, "val.csv"), IMAGES_DIR,
+        val_csv, IMAGES_DIR,
         mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W,
     )
 
@@ -298,17 +343,16 @@ def main():
     print("FINAL TEST EVALUATION")
     print("=" * 60)
 
-    test_csv = Path(SPLITS_DIR, "test.csv")
     if test_csv.exists():
         # Reload best checkpoint
         state = torch.load(os.path.join(RUN_DIR, "crnn_best.pt"), map_location=device, weights_only=False)
         model.load_state_dict(state["model"])
         model.eval()
 
-        # Build bigram LM from training labels
+        # Build bigram LM from training labels (from filtered train split if --exclude was used)
         print("Building Arabic bigram LM from training labels...")
         from .dataset import read_label
-        train_df = pd.read_csv(Path(SPLITS_DIR, "train.csv"))
+        train_df = pd.read_csv(train_csv)
         train_texts = []
         for _, row in train_df.iterrows():
             try:
@@ -356,6 +400,13 @@ def main():
                   f"WER(n)={test_wer_n:.4f} | DotCER={test_dot:.4f}")
     else:
         print("No test.csv found — skipping test evaluation.")
+
+    # Clean up any temp filtered split CSVs
+    for p in tmp_csvs:
+        try:
+            os.unlink(str(p))
+        except OSError:
+            pass
 
 if __name__ == "__main__":
     main()
