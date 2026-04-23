@@ -13,6 +13,7 @@ import csv
 import json
 import glob
 import argparse
+import subprocess
 from collections import defaultdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from rapidfuzz.distance import Levenshtein as _Lev
@@ -243,6 +244,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   .status { text-align: center; margin-top: 16px; color: #8b949e; font-size: 0.8em; }
   .status .live { color: #3fb950; }
+  .pull-btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+              border-radius: 5px; padding: 3px 10px; font-size: 0.9em; cursor: pointer;
+              font-family: inherit; }
+  .pull-btn:hover { background: #30363d; }
+  .pull-btn:disabled { opacity: 0.6; cursor: wait; }
+  #pull-result { margin-left: 8px; font-family: ui-monospace, monospace; }
+  #pull-result.ok { color: #3fb950; }
+  #pull-result.err { color: #f85149; }
   @media (max-width: 700px) { .charts { grid-template-columns: 1fr; }
     .analysis-grid { grid-template-columns: 1fr; }
     .confusion-grid { flex-direction: column; } }
@@ -296,7 +305,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<p class="status">Auto-refresh every <strong>30s</strong> &middot; <span class="live" id="status-text">waiting...</span></p>
+<p class="status">
+  Auto-refresh every <strong>30s</strong> &middot;
+  <span class="live" id="status-text">waiting...</span> &middot;
+  <button id="pull-btn" class="pull-btn" onclick="doPull()">git pull</button>
+  <span id="pull-result"></span>
+</p>
 
 <script>
 const INITIAL_SHOW = 10;
@@ -544,6 +558,32 @@ async function refresh() {
   }
 }
 
+async function doPull() {
+  const btn = document.getElementById('pull-btn');
+  const out = document.getElementById('pull-result');
+  btn.disabled = true;
+  out.className = '';
+  out.textContent = 'pulling...';
+  try {
+    const r = await fetch('/api/pull', { method: 'POST' });
+    const data = await r.json();
+    if (data.ok) {
+      out.className = 'ok';
+      const clean = (data.stdout || '').trim().split('\n').pop() || 'ok';
+      out.textContent = clean;
+      refresh();
+    } else {
+      out.className = 'err';
+      out.textContent = (data.stderr || 'error').trim().split('\n')[0];
+    }
+  } catch (e) {
+    out.className = 'err';
+    out.textContent = 'fetch failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 refresh();
 setInterval(refresh, 30000);
 </script>
@@ -563,6 +603,32 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self._serve_confusion()
         else:
             self._serve_html()
+
+    def do_POST(self):
+        if self.path.startswith("/api/pull"):
+            self._serve_pull()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _serve_pull(self):
+        try:
+            proc = subprocess.run(
+                ["git", "pull"], capture_output=True, text=True, timeout=30,
+            )
+            body = {
+                "ok": proc.returncode == 0,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "returncode": proc.returncode,
+            }
+        except subprocess.TimeoutExpired:
+            body = {"ok": False, "stdout": "", "stderr": "git pull timed out after 30s",
+                    "returncode": -1}
+        except Exception as e:
+            body = {"ok": False, "stdout": "", "stderr": f"{type(e).__name__}: {e}",
+                    "returncode": -1}
+        self._json_response(body)
 
     def _serve_html(self):
         self.send_response(200)
