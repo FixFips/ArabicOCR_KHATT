@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
@@ -7,12 +8,15 @@ from .preprocess import (
     resize_keep_ratio_height, pad_width, pad_to_square
 )
 
+_WS_RUN = re.compile(r"\s+")
+
 
 def read_label(path: str) -> str:
     for enc in ["windows-1256", "utf-8", "utf-8-sig"]:
         try:
             with open(path, "r", encoding=enc) as f:
-                return f.read().strip()
+                raw = f.read()
+            return _WS_RUN.sub(" ", raw).strip()
         except Exception:
             pass
     raise RuntimeError(f"Cannot read label file: {path}")
