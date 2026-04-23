@@ -394,7 +394,7 @@ with gr.Blocks(title="Arabic OCR — Test Bench") as demo:
             run_btn = gr.Button("Recognize", variant="primary")
 
     with gr.Row():
-        out_text = gr.Textbox(label="Prediction (RTL)", lines=6, show_copy_button=True, rtl=True)
+        out_text = gr.Textbox(label="Prediction (RTL)", lines=6, rtl=True)
     metrics = gr.HTML()
     timing  = gr.HTML()
     prev = gr.Image(label="What the model saw (preprocessed line(s))", type="pil")
