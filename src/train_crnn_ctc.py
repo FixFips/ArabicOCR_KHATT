@@ -161,10 +161,28 @@ class CRNNCollate:
 
 # ------------- Train -------------
 def main():
+    global RUN_DIR, LOG_FILE, CKPT_PATH
     parser = argparse.ArgumentParser(description="Train Arabic CRNN-CTC on KHATT")
     parser.add_argument("--exclude", action="append", default=[],
                         help="TSV with 'filename' column; rows are dropped from all splits. Repeatable.")
+    parser.add_argument("--run-dir", default=RUN_DIR,
+                        help="Output directory for this training run (default: ./runs/exp1).")
+    parser.add_argument("--archive-old", action="store_true",
+                        help="If --run-dir already contains a metrics.csv, rename the old dir "
+                             "to <dir>_<timestamp> before starting a fresh run.")
     args = parser.parse_args()
+
+    # Apply --run-dir override to module globals so downstream code picks it up
+    RUN_DIR = args.run_dir
+    LOG_FILE = os.path.join(RUN_DIR, "metrics.csv")
+    CKPT_PATH = os.path.join(RUN_DIR, "crnn_best.pt")
+
+    # Archive any existing run before we start overwriting it
+    if args.archive_old and os.path.exists(os.path.join(RUN_DIR, "metrics.csv")):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archived = f"{RUN_DIR.rstrip(os.sep)}_{ts}"
+        os.rename(RUN_DIR, archived)
+        print(f"Archived previous run: {RUN_DIR} -> {archived}")
 
     os.makedirs(RUN_DIR, exist_ok=True)
     _init_metrics_file()

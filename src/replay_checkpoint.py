@@ -224,6 +224,16 @@ def main():
     print("=" * 72)
     print(f"Best: {best['config']} — CER {best['cer']*100:.2f}%")
 
+    if args.out_tsv:
+        with open(args.out_tsv, "w", encoding="utf-8", newline="") as f:
+            f.write("config\tcer\twer\twer_norm\tdot_cer\ttime_s\tsamples\tckpt\tsplit\texcluded\n")
+            excluded = ",".join(args.exclude) if args.exclude else ""
+            for r in results:
+                f.write(f"{r['config']}\t{r['cer']:.6f}\t{r['wer']:.6f}\t"
+                        f"{r['wer_n']:.6f}\t{r['dot_cer']:.6f}\t{r['time']:.2f}\t"
+                        f"{r['samples']}\t{args.ckpt}\t{args.split}\t{excluded}\n")
+        print(f"Saved sweep TSV: {args.out_tsv}")
+
 
 if __name__ == "__main__":
     main()
