@@ -711,12 +711,19 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    global METRICS_PATH, RUN_DIR
     ap = argparse.ArgumentParser(description="Live training monitor")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--run-dir", default=RUN_DIR,
+                    help=f"Run directory to monitor (default: {RUN_DIR})")
     args = ap.parse_args()
+
+    RUN_DIR = args.run_dir
+    METRICS_PATH = os.path.join(RUN_DIR, "metrics.csv")
 
     server = HTTPServer(("0.0.0.0", args.port), MonitorHandler)
     print(f"Monitor running at http://0.0.0.0:{args.port}")
+    print(f"  Watching: {RUN_DIR}")
     print(f"Access from your Mac: http://<PC-IP>:{args.port}")
     print("Press Ctrl+C to stop\n")
     try:

@@ -24,7 +24,10 @@ def _read_metrics(run_dir: str):
     path = os.path.join(run_dir, "metrics.csv")
     if not os.path.exists(path):
         return []
-    rows = []
+    # metrics.csv can accumulate multiple training runs (same dir, run again
+    # without clearing). Keep the LAST occurrence of each epoch number so the
+    # chart reflects the most recent run, not whatever was written first.
+    by_epoch = {}
     with open(path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames:
@@ -34,18 +37,19 @@ def _read_metrics(run_dir: str):
                    v.strip() if isinstance(v, str) else v
                    for k, v in row.items() if isinstance(k, str)}
             try:
-                rows.append({
-                    "epoch": int(float(row.get("epoch", 0))),
+                ep = int(float(row.get("epoch", 0)))
+                by_epoch[ep] = {
+                    "epoch": ep,
                     "train_loss": float(row.get("train_loss", 0)),
                     "cer": float(row.get("cer", 1)),
                     "wer": float(row.get("wer", 1)),
                     "wer_norm": float(row.get("wer_norm", 1)),
                     "dot_cer": float(row.get("dot_cer", 1)),
                     "lr": float(row.get("lr", 0)),
-                })
+                }
             except (ValueError, KeyError):
                 pass
-    return rows
+    return [by_epoch[e] for e in sorted(by_epoch)]
 
 
 def _summary(run_dir: str, rows: list):
@@ -120,6 +124,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 </style></head><body>
 <h1>Run Comparison</h1>
 <div id="summary"></div>
+<div id="h2h" style="margin:0 auto 20px; max-width:1300px;"></div>
 <div class="grid">
   <div class="chart-box"><h3>CER</h3><canvas id="c-cer"></canvas></div>
   <div class="chart-box"><h3>DotCER</h3><canvas id="c-dot"></canvas></div>
@@ -146,7 +151,41 @@ async function load() {
   const r = await fetch('/api/data?_=' + Date.now());
   const data = await r.json();
   renderSummary(data.summaries);
+  renderHeadToHead(data.runs);
   renderCharts(data.runs);
+}
+function renderHeadToHead(runs) {
+  // Use the run with the smallest last epoch as the "live" run — compare others at same epoch.
+  const valid = runs.filter(r => r.rows && r.rows.length);
+  if (valid.length < 2) { document.getElementById('h2h').innerHTML = ''; return; }
+  const lastEps = valid.map(r => r.rows[r.rows.length - 1].epoch);
+  const anchor = Math.min(...lastEps);
+  const start = Math.max(1, anchor - 4);
+  const metrics = [['cer','CER'], ['wer','WER'], ['dot_cer','DotCER'], ['train_loss','Loss']];
+  let h = `<h3 style="text-align:center;color:#8b949e;margin-bottom:8px;font-size:0.95em;">Head-to-head @ epoch ${anchor} (and previous 4)</h3>`;
+  h += '<table style="margin:0 auto;"><tr><th>Epoch</th>';
+  for (const r of valid) for (const [k, lbl] of metrics) h += `<th>${r.name} ${lbl}</th>`;
+  if (valid.length === 2) for (const [k, lbl] of metrics.slice(0, 3)) h += `<th>Δ ${lbl}</th>`;
+  h += '</tr>';
+  const fmt = (key, v) => v == null ? '-' : (key === 'train_loss' ? v.toFixed(3) : (v*100).toFixed(2) + '%');
+  for (let ep = start; ep <= anchor; ep++) {
+    h += `<tr><td class="run">${ep}</td>`;
+    const rowsAtEp = valid.map(r => r.rows.find(x => x.epoch === ep));
+    for (const row of rowsAtEp) for (const [k] of metrics) h += `<td>${row ? fmt(k, row[k]) : '-'}</td>`;
+    if (valid.length === 2 && rowsAtEp[0] && rowsAtEp[1]) {
+      for (const [k, lbl] of metrics.slice(0, 3)) {
+        const d = (rowsAtEp[0][k] - rowsAtEp[1][k]) * 100;
+        const col = d > 0 ? '#3fb950' : (d < 0 ? '#f85149' : '#8b949e');
+        h += `<td style="color:${col};font-weight:600;">${d > 0 ? '+' : ''}${d.toFixed(2)}pp</td>`;
+      }
+    }
+    h += '</tr>';
+  }
+  h += '</table>';
+  h += '<div style="text-align:center;color:#8b949e;font-size:0.8em;margin-top:6px;">Δ = '
+     + (valid.length === 2 ? `${valid[0].name} − ${valid[1].name}; positive = ${valid[0].name} worse (higher error)` : '')
+     + '</div>';
+  document.getElementById('h2h').innerHTML = h;
 }
 function renderSummary(summaries) {
   let h = '<table><tr><th>Run</th><th>Epochs</th><th>Best CER</th><th>@Ep</th><th>Last WER</th><th>Last DotCER</th><th>Min Loss</th></tr>';
