@@ -170,6 +170,8 @@ def main():
     parser.add_argument("--archive-old", action="store_true",
                         help="If --run-dir already contains a metrics.csv, rename the old dir "
                              "to <dir>_<timestamp> before starting a fresh run.")
+    parser.add_argument("--attention", action="store_true",
+                        help="Arch v3: add one transformer encoder layer after BiLSTM for global context.")
     args = parser.parse_args()
 
     # Apply --run-dir override to module globals so downstream code picks it up
@@ -229,9 +231,11 @@ def main():
     torch.backends.cudnn.benchmark = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device, torch.cuda.get_device_name(0) if device.type == "cuda" else "")
-    model = CRNN(num_classes).to(device)
+    model = CRNN(num_classes, use_attention=args.attention).to(device)
+    arch_version = 3 if args.attention else 2
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {total_params:,}")
+    print(f"Model parameters: {total_params:,}  |  arch_version={arch_version}"
+          f"{' (with transformer encoder layer)' if args.attention else ''}")
 
     criterion = nn.CTCLoss(blank=0, zero_infinity=True)
     optimizer = optim.AdamW(model.parameters(), lr=LR)
@@ -339,7 +343,8 @@ def main():
             best_cer = mcer
             patience_counter = 0
             torch.save(
-                {"model": model.state_dict(), "vocab": vocab, "arch_version": 2},
+                {"model": model.state_dict(), "vocab": vocab,
+                 "arch_version": arch_version, "use_attention": args.attention},
                 os.path.join(RUN_DIR, "crnn_best.pt"),
             )
             ckpt_saved = True

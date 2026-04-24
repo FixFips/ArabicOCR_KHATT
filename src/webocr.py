@@ -37,7 +37,8 @@ def load_vocab_from_ckpt(path: str):
         raise RuntimeError("Checkpoint missing 'vocab'. Save as {'model':..., 'vocab':...}.")
     vocab = state["vocab"]
     id2char = {i: c for i, c in enumerate(vocab)}
-    return vocab, id2char, state["model"]
+    use_attention = bool(state.get("use_attention", False))
+    return vocab, id2char, state["model"], use_attention
 
 
 # ---------- Line preprocessing (uses same pipeline as training) ----------
@@ -342,9 +343,9 @@ def rotate_if_needed(pil: Image.Image, angle_deg: float) -> Image.Image:
 
 # ---------------- Model init ----------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-vocab, id2char, state_dict = load_vocab_from_ckpt(CKPT)
+vocab, id2char, state_dict, _use_attn = load_vocab_from_ckpt(CKPT)
 char2id = {c: i for i, c in enumerate(vocab)}
-model = CRNN(num_classes=len(vocab)).to(device)
+model = CRNN(num_classes=len(vocab), use_attention=_use_attn).to(device)
 model.load_state_dict(state_dict)
 model.eval()
 to_tensor = transforms.ToTensor()

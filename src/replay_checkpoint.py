@@ -159,7 +159,7 @@ def main():
     unk_id = char2id.get("<unk>", 1)
     print(f"Checkpoint: {args.ckpt}  (arch_version={state.get('arch_version', '?')}, vocab={num_classes})")
 
-    model = CRNN(num_classes).to(device)
+    model = CRNN(num_classes, use_attention=bool(state.get("use_attention", False))).to(device)
     model.load_state_dict(state["model"])
     model.eval()
 

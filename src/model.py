@@ -25,8 +25,9 @@ class CRNN(nn.Module):
         -> Dropout -> FC -> (T, B, num_classes)
     """
 
-    def __init__(self, num_classes: int):
+    def __init__(self, num_classes: int, use_attention: bool = False):
         super().__init__()
+        self.use_attention = use_attention
         # --- CNN feature extractor (full BatchNorm for dot-feature parity) ---
         self.cnn = nn.Sequential(
             # Block 1
@@ -72,6 +73,18 @@ class CRNN(nn.Module):
             bidirectional=True, num_layers=2,
             batch_first=True, dropout=0.2,
         )
+        # --- Optional transformer encoder layer (arch v3) ---
+        # Adds global context on top of the BiLSTM's local sequential pass.
+        # One layer keeps parameter count modest (~2.5M extra on top of ~15M).
+        # BiLSTM output already carries positional information, so no explicit PE.
+        if use_attention:
+            self.attn = nn.TransformerEncoderLayer(
+                d_model=768, nhead=4, dim_feedforward=1024,
+                dropout=0.2, activation="gelu",
+                batch_first=True, norm_first=True,
+            )
+        else:
+            self.attn = None
         self.fc_drop = nn.Dropout(0.3)
         self.fc = nn.Linear(384 * 2, num_classes)  # bidirectional → 768
 
@@ -82,6 +95,8 @@ class CRNN(nn.Module):
         x = F.adaptive_avg_pool2d(x, (3, W))        # [B, 512, 3, W']
         x = x.view(B, C * 3, W).permute(0, 2, 1)   # [B, W', 1536]
         x, _ = self.rnn(x)                          # [B, W', 768]
+        if self.attn is not None:
+            x = self.attn(x)                        # [B, W', 768] — global context
         x = self.fc_drop(x)
         x = self.fc(x)                              # [B, W', num_classes]
         return x.permute(1, 0, 2)                   # [T=W', B, C]
