@@ -1,4 +1,4 @@
-# src/augment.py
+# arabicocr_khatt/augment.py
 """
 Arabic-safe data augmentation for handwriting OCR.
 

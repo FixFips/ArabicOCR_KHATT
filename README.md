@@ -1,256 +1,162 @@
-# ArabicOCR_KHATT (CRNN-CTC)
+# ArabicOCR-KHATT — Arabic Handwritten Text Recognition (CRNN-CTC)
 
-This project is an **Arabic handwritten text recognition** system.
+[![PyPI](https://img.shields.io/pypi/v/arabicocr-khatt)](https://pypi.org/project/arabicocr-khatt/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Model on HF](https://img.shields.io/badge/%F0%9F%A4%97%20Hub-FixFips%2Farabicocr--khatt-blue)](https://huggingface.co/FixFips/arabicocr-khatt)
 
-- Model: CRNN (CNN + BiLSTM) with CTC loss  
-- Level: line-based OCR (one line or paragraph image → text)  
-- Dataset: **KHATT** handwritten Arabic (images + text labels)  
-- Extras: a small **Gradio web demo** for testing on your own images
+**Arabic handwritten text recognition** — line-level OCR (a line or paragraph
+image → Arabic text), trained on the **KHATT** dataset.
 
-Metrics per epoch (CER, WER, normalized WER) are saved to  
-`runs/<exp_name>/metrics.csv`.
+What makes it Arabic-specific rather than a generic CRNN:
 
----
-
-## 1. Features
-
-- **CRNN-CTC model** for Arabic text (right-to-left handling inside the code).
-- **Preprocessing**:
-  - grayscale + CLAHE (local contrast)
-  - Otsu / adaptive threshold
-  - automatic polarity (tries to keep black text on white background)
-- **Automatic splits**: builds `train/val/test` CSVs from the `data` folder.
-- **Metrics logger**:
-  - per-epoch `train_loss`, `CER`, `WER`, `WER(norm)`
-  - `show_metrics.py` script to summarize runs
-- **Web demo** (`src/webocr.py`) with:
-  - image upload / paste / webcam
-  - crop region
-  - rotate slider
-  - upscale slider (for tiny text)
-  - polarity mode: **Auto / Normal / Invert**
-  - preview of “what the model saw” after preprocessing
+- **3-zone vertical pooling** — preserves *where* dots sit (above vs below the
+  baseline), the only difference between ب/ت/ث and ن/ي
+- **Input height 96** — keeps diacritic dots large enough (3–5 px) for 3×3
+  convolutions to detect
+- **Dot-safe augmentation** — shear, kashida stretch, mild rotation; erosion /
+  dilation / elastic are banned because they destroy 2–4 px dots
+- **Beam-search decoding with an Arabic character bigram LM**
+- **Dot-group CER metric** — tracks errors on dot-differentiated letter groups,
+  the #1 Arabic OCR error source
 
 ---
 
-## 2. Project structure
+## Install
+
+```bash
+pip install arabicocr-khatt
+```
+
+## Quickstart
+
+```python
+from arabicocr_khatt import ArabicOCR
+
+ocr = ArabicOCR.from_pretrained()        # downloads weights from the HF Hub
+text = ocr.recognize("handwritten_page.jpg")   # multi-line pages segmented automatically
+print(text)
+```
+
+Or from the command line:
+
+```bash
+arabicocr handwritten_page.jpg
+arabicocr line.png --no-segment --greedy       # single line, fastest decode
+arabicocr scan.jpg --checkpoint runs/exp1/crnn_best.pt   # local weights
+```
+
+Try it in the browser: **[demo Space on Hugging Face](https://huggingface.co/spaces/FixFips/arabicocr-khatt-demo)**.
+
+---
+
+## Architecture
+
+```
+Input [B, 1, 96, 1536] grayscale
+  → CNN (7 conv layers, full BatchNorm, Dropout2d)
+  → adaptive pool to 3 vertical zones (dot position preserved)
+  → 2-layer BiLSTM(1536 → 384)
+  → FC → CTC loss
+  → greedy or beam-search decode (+ Arabic bigram LM), reversed back to RTL
+```
+
+Preprocessing (shared between training and inference): grayscale → CLAHE →
+dual-polarity Otsu binarization → LANCZOS resize to H=96 → pad to W=1536.
+
+## Project structure
 
 ```text
 ArabicOCR_KHATT/
-├─ src/
-│  ├─ __init__.py
-│  ├─ charset_arabic.txt      # charset used for labels (includes <pad>, <unk>, etc.)
-│  ├─ dataset.py              # KHATTDataset (images + labels + preprocessing)
-│  ├─ metrics.py              # CER / WER functions (Levenshtein)
-│  ├─ preprocess.py           # image preprocessing (CLAHE, binarize, padding...)
-│  ├─ show_metrics.py         # small script to print best/last metrics from CSV
-│  ├─ train_crnn_ctc.py       # main training script
-│  └─ webocr.py               # Gradio web demo
-├─ data/                      # (ignored by git) images + labels + splits
-├─ runs/                      # (ignored by git) checkpoints + metrics.csv
-├─ research/                  # optional experiments / notes
-├─ requirements.txt
-├─ LICENSE
-└─ README.md
+├─ arabicocr_khatt/            # the installable package
+│  ├─ pipeline.py              # ArabicOCR API + CLI (inference single-source)
+│  ├─ model.py                 # CRNN + CTC decoders + bigram LM builder
+│  ├─ preprocess.py            # CLAHE, binarization, resize, padding
+│  ├─ augment.py               # Arabic-safe augmentation
+│  ├─ dataset.py               # KHATTDataset
+│  ├─ metrics.py               # CER / WER / dot-group CER
+│  ├─ train_crnn_ctc.py        # training script
+│  ├─ webocr.py                # Gradio test bench (rich debugging UI)
+│  ├─ show_metrics.py, monitor.py, compare_runs.py, eval_val.py, ...
+│  └─ charset_arabic.txt       # 75-class charset
+├─ scripts/upload_to_hf.py     # publish weights + model card to the HF Hub
+├─ space/                      # Hugging Face Space demo app
+├─ archive/                    # (gitignored) KHATT images + labels + splits
+├─ runs/                       # (gitignored) checkpoints + metrics.csv
+└─ pyproject.toml
 ```
 
-Note: data/ and runs/ are not tracked by git (see .gitignore),
-so you need to create them locally.
+---
 
-⸻
+## Training your own model
 
-## 3. Installation
-
-Create a virtual environment and install dependencies.
-
-**Windows (PowerShell)**
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-**macOS / Linux**
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-`requirements.txt` includes:
-
-- torch>=2.2  
-- torchvision>=0.17  
-- numpy>=1.24  
-- pandas>=2.0  
-- scikit-learn>=1.3  
-- pillow>=10.0  
-- opencv-python>=4.8  
-- rapidfuzz>=3.6  
-- gradio>=4.0  
-
-⸻
-
-## 4. Dataset preparation (KHATT)
-
-The KHATT dataset itself is not included in this repo.
-
-Expected structure:
+Get the KHATT dataset (request access at [khatt.ideas2serve.net](https://khatt.ideas2serve.net/))
+and lay it out as:
 
 ```text
-data/
-├─ images/
-│  ├─ 000001.png
-│  ├─ 000002.png
-│  └─ ...
-├─ labels/
-│  ├─ 000001.txt   # Arabic text (Windows-1256 / UTF-8 / UTF-8-SIG)
-│  ├─ 000002.txt
-│  └─ ...
-└─ splits/         # will be auto-created if missing
-   ├─ train.csv
-   ├─ val.csv
-   └─ test.csv
+archive/
+├─ images/   *.jpg            # line images
+├─ labels/   *.txt            # Arabic text (Windows-1256 / UTF-8)
+└─ splits/                    # auto-created train/val/test CSVs (80/10/10)
 ```
 
-On the first run, `train_crnn_ctc.py` will:
-- scan `data/images` + `data/labels`
-- build `train.csv`, `val.csv`, `test.csv` under `data/splits/`
-
-Each CSV row contains: `filename,label_path`.
-
-⸻
-
-## 5. Training
-
-From the project root (with the venv activated):
+Then, with the training extras installed:
 
 ```bash
-python -m src.train_crnn_ctc
+pip install -e ".[train]"
+python -m arabicocr_khatt.train_crnn_ctc                 # trains to runs/exp1
+python -m arabicocr_khatt.show_metrics --run ./runs/exp1 # inspect metrics
+python -m arabicocr_khatt.monitor                        # live training dashboard
 ```
 
-The script will:
-- create the splits (if they don’t exist)
-- train the CRNN-CTC model
-- log metrics to `runs/exp1/metrics.csv`
-- save the best checkpoint (by CER) to `runs/exp1/crnn_best.pt`
+Training uses OneCycleLR, gradient accumulation, early stopping, and logs
+per-epoch CER / WER / WER(norm) / dot-group CER to `runs/<exp>/metrics.csv`.
+Checkpoints are saved as `{"model": state_dict, "vocab": [...], "arch_version": 2}`.
 
-You can change basic settings at the top of `src/train_crnn_ctc.py`:
+## Web test bench (Gradio)
 
-```python
-IMAGES_DIR = "./data/images"
-LABELS_DIR = "./data/labels"
-SPLITS_DIR = "./data/splits"
-RUN_DIR    = "./runs/exp1"
-
-HEIGHT     = 64
-MAX_W      = 1024
-BATCH_SIZE = 32
-EPOCHS     = 70
-LR         = 1e-3
-```
-
-There is also a resume/fine-tune option: if `crnn_best.pt` already exists,
-the script loads the weights and continues with a smaller learning rate.
-
-⸻
-
-## 6. Viewing metrics
-
-You can quickly see the best epoch and the last epoch using:
+A rich debugging UI with crop/rotate, polarity control, decoder comparison,
+confidence heatmaps, char-level diff against ground truth, and batch evaluation:
 
 ```bash
-# show metrics for one run
-python -m src.show_metrics --run ./runs/exp1
+pip install -e ".[demo]"
+python -m arabicocr_khatt.webocr
 ```
 
-Or scan all run folders:
+## Publishing weights to the Hub
+
+After training (on the machine that has `runs/` and `archive/`):
 
 ```bash
-python -m src.show_metrics --all
+hf auth login
+python scripts/upload_to_hf.py --run-dir runs/exp1
 ```
 
-Example output (just an idea):
+This validates the checkpoint, builds the bigram LM from the training split,
+fills the model card with your best-epoch metrics, and uploads everything to
+[FixFips/arabicocr-khatt](https://huggingface.co/FixFips/arabicocr-khatt).
 
-```text
-=== ./runs/exp1 ===
-epochs: 70 | best epoch (CER): 22 | best CER: 0.120 | WER: 0.419 | WER(norm): 0.409
-last  : epoch 70 | train_loss: 0.002 | CER: 0.121 | WER: 0.423 | WER(norm): 0.414
+---
 
- epoch | train_loss |   CER  |  WER  | WER(n) | saved
--------+------------+--------+-------+--------+------
-    61 |      0.043 |  0.128 | 0.439 |  0.429 |  0
-    62 |      0.038 |  0.126 | 0.435 |  0.425 |  0
-    ...
-```
+## Notes and limitations
 
-⸻
+- Trained on KHATT: performance is best on handwriting similar to that dataset.
+  Printed fonts, very noisy backgrounds, or strongly curved text may fail.
+- Line-level model: pages are segmented into lines with classical morphology;
+  complex layouts may segment poorly.
+- Labels use Windows-1256 encoding (KHATT standard); the reader falls back to
+  UTF-8 automatically.
 
-## 7. Web demo (Gradio)
+## Contributing
 
-To run the web interface:
+Contributions are very welcome — Arabic OCR is an underserved area and there is
+plenty to do. See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[good first issues](https://github.com/FixFips/ArabicOCR_KHATT/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
-```bash
-python -m src.webocr
-```
+## License
 
-A local URL will appear in the terminal (for example `http://127.0.0.1:7860`).
+MIT — see [LICENSE](LICENSE).
 
-The UI lets you:
-- upload, paste, or capture an image
-- crop the region that contains text
-- rotate the image (small angles)
-- upscale small text before OCR
-- choose a polarity mode:
-  - Auto (try both): normal + inverted, keeps the better one
-  - Normal (black on white)
-  - Invert (white on black)
-- see:
-  - the recognized text (RTL)
-  - a preview of the preprocessed line(s) the model actually used
+If you use this project in research, please also cite the KHATT dataset:
 
-This is useful for testing on signs, notebook photos, product labels, etc.
-
-⸻
-
-## 8. Notes and limitations
-
-- The model is trained on KHATT, so performance is best on handwriting
-  similar to that dataset (line-level Arabic writing).
-- Printed fonts, very noisy backgrounds, or extremely curved text may fail.
-- The web demo preprocessing is similar to training, but we added a few
-  extra tricks (contrast, polarity, rotation) to handle real-world images.
-
-⸻
-
-## 9. Git quick start 
-
-If you clone this repo or want to reuse the template:
-
-```bash
-git init
-git add .
-git commit -m "Initial commit: CRNN-CTC Arabic OCR + web demo"
-git branch -M main
-```
-
-Then create an empty GitHub repo named `ArabicOCR_KHATT`, and:
-
-```bash
-git remote add origin https://github.com/<your-user>/ArabicOCR_KHATT.git
-git push -u origin main
-```
-
-`.gitignore` already ignores:
-- `data/`, `runs/`, checkpoints (`*.pt`, `*.pth`, `*.onnx`)
-- local envs (`.venv/`, `.env/`, `.gradio/`)
-- editor/OS files (`.idea/`, `.vscode/`, `.DS_Store`, etc.)
-
-⸻
-
-## 10. License
-
-This project is released under the terms in `LICENSE`.
-
+> Mahmoud, S. A., et al. "KHATT: An open Arabic offline handwritten text
+> database." Pattern Recognition 47.3 (2014): 1096–1112.

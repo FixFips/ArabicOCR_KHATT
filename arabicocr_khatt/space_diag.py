@@ -7,8 +7,8 @@ Reads the full-val TSV (written by eval_val.py) and reports:
   * sample lines with the biggest space deletions
 
 Usage:
-    python -m src.space_diag
-    python -m src.space_diag --tsv runs/exp1/val_epoch_999_samples.tsv
+    python -m arabicocr_khatt.space_diag
+    python -m arabicocr_khatt.space_diag --tsv runs/exp1/val_epoch_999_samples.tsv
 """
 import argparse
 import csv
