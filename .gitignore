@@ -20,6 +20,11 @@ checkpoints/
 *.pth
 *.onnx
 
+# Packaging
+build/
+dist/
+*.egg-info/
+
 # OS/editor
 .DS_Store
 Thumbs.db

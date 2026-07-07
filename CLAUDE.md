@@ -79,7 +79,8 @@ T=385 timesteps vs max label length 132 chars = 2.9x ratio (CTC needs T >= label
 ## File Structure
 
 ```
-src/
+arabicocr_khatt/
+  pipeline.py         -- ArabicOCR inference API + CLI (single source for inference)
   model.py            -- CRNN architecture + CTC decoders (greedy + beam) + bigram LM builder
   augment.py          -- ArabicAugment class (dot-safe transforms only)
   train_crnn_ctc.py   -- Training loop (OneCycleLR, grad accum, early stopping, test eval)
@@ -116,17 +117,20 @@ webocr.py         -- imports model, preprocess
 ## Commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install (editable, with training + demo extras)
+pip install -e ".[train,demo]"
+
+# Recognize an image with published weights
+arabicocr page.jpg
 
 # Train (creates splits automatically on first run)
-python -m src.train_crnn_ctc
+python -m arabicocr_khatt.train_crnn_ctc
 
 # View training metrics
-python -m src.show_metrics --run ./runs/exp1
+python -m arabicocr_khatt.show_metrics --run ./runs/exp1
 
 # Launch web demo (requires trained checkpoint at runs/exp1/crnn_best.pt)
-python -m src.webocr
+python -m arabicocr_khatt.webocr
 ```
 
 ## Training Configuration
@@ -258,12 +262,12 @@ Greedy decode -> Reverse -> CER/WER
 
 ## Important Notes
 
-- The CRNN class lives ONLY in `src/model.py`. Both training and web demo import from there. Never duplicate it.
+- The CRNN class lives ONLY in `arabicocr_khatt/model.py`. Both training and web demo import from there. Never duplicate it.
 - Labels use **windows-1256** encoding (KHATT standard). The dataset reader tries this first, then falls back to UTF-8.
 - Charset comment lines must start with `# ` (hash + space). A bare `#` is the hash character itself.
 - Diacritics are extremely rare in KHATT (<40 total across 713K characters). WER_norm is nearly equal to WER.
 - Data lives in `archive/` (gitignored). The `data/` directory is unused.
-- All preprocessing (binarize, resize, pad) is shared between training and web demo via `src/preprocess.py`.
+- All preprocessing (binarize, resize, pad) is shared between training and web demo via `arabicocr_khatt/preprocess.py`.
 - The old v1 checkpoint format (without `arch_version`) is NOT compatible with v2 architecture. Must retrain from scratch.
 - `num_workers=2` works on Windows because `collate_fn` runs in the main process and `KHATTDataset` + `ArabicAugment` are picklable.
 - Python 3.9+ required (PEP 585 type hints used). Python 3.10+ recommended.

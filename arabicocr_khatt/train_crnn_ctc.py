@@ -42,7 +42,7 @@ LR         = 1e-3
 SEED       = 42
 PATIENCE   = 15       # early stopping patience (epochs without CER improvement)
 
-CHARSET_PATH = "./src/charset_arabic.txt"
+CHARSET_PATH = os.path.join(os.path.dirname(__file__), "charset_arabic.txt")
 
 SHOW_SAMPLES_PRINT = 5
 

@@ -4,7 +4,7 @@ Loads runs/exp1/crnn_best.pt, runs greedy CTC decode over the val split,
 prints CER/WER/WER(n)/DotCER, and writes a full samples TSV.
 
 Usage:
-    python -m src.eval_val
+    python -m arabicocr_khatt.eval_val
 """
 import os
 import re
