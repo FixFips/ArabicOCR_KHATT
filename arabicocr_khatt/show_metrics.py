@@ -1,4 +1,4 @@
-# src/show_metrics.py
+# arabicocr_khatt/show_metrics.py
 import os, argparse, csv
 from pathlib import Path
 

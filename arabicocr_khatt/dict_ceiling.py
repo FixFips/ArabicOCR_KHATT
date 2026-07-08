@@ -8,8 +8,8 @@ This gives an *upper bound* on what any lexicon-constrained decoder could
 achieve — no fancy tooling (no morphological analyzer, no context scoring).
 
 Usage:
-    python -m src.dict_ceiling
-    python -m src.dict_ceiling --tsv runs/exp1/val_epoch_999_samples.tsv
+    python -m arabicocr_khatt.dict_ceiling
+    python -m arabicocr_khatt.dict_ceiling --tsv runs/exp1/val_epoch_999_samples.tsv
 """
 import argparse
 import csv

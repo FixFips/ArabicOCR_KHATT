@@ -1,11 +1,11 @@
-# src/monitor.py
+# arabicocr_khatt/monitor.py
 """
 Live training monitor — serves a web dashboard that reads metrics.csv + sample predictions.
 Access from any device on the same network.
 
 Usage:
-    python -m src.monitor                  # default port 8080
-    python -m src.monitor --port 9090      # custom port
+    python -m arabicocr_khatt.monitor                  # default port 8080
+    python -m arabicocr_khatt.monitor --port 9090      # custom port
 """
 
 import os

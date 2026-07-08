@@ -5,9 +5,9 @@ table, and serves a small web dashboard that overlays CER / WER /
 DotCER / Train-Loss curves.
 
 Usage:
-    python -m src.compare_runs runs/exp1 runs/exp2
-    python -m src.compare_runs runs/exp1 runs/exp2 --port 8090
-    python -m src.compare_runs runs/exp1 runs/exp2 --cli-only
+    python -m arabicocr_khatt.compare_runs runs/exp1 runs/exp2
+    python -m arabicocr_khatt.compare_runs runs/exp1 runs/exp2 --port 8090
+    python -m arabicocr_khatt.compare_runs runs/exp1 runs/exp2 --cli-only
 """
 import argparse
 import csv

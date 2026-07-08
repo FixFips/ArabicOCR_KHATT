@@ -1,0 +1,2 @@
+# Once published to PyPI, replace the git URL with: arabicocr-khatt
+git+https://github.com/FixFips/ArabicOCR_KHATT.git@main

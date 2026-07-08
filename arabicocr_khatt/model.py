@@ -1,4 +1,4 @@
-# src/model.py
+# arabicocr_khatt/model.py
 """Shared CRNN-CTC model and decoding functions for Arabic handwriting OCR."""
 
 import re

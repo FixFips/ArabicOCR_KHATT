@@ -6,16 +6,16 @@ same images. Prints a summary table of CER / WER / WER(n) / DotCER.
 
 Usage:
     # Default: greedy + beam(10) + beam(10)+lm(0.3)
-    python -m src.replay_checkpoint
+    python -m arabicocr_khatt.replay_checkpoint
 
     # Sweep beam widths (lm disabled)
-    python -m src.replay_checkpoint --beam-widths 5,10,20 --no-lm
+    python -m arabicocr_khatt.replay_checkpoint --beam-widths 5,10,20 --no-lm
 
     # Sweep LM weights at fixed beam=10
-    python -m src.replay_checkpoint --beam-widths 10 --lm-weights 0.0,0.1,0.3,0.5,0.7
+    python -m arabicocr_khatt.replay_checkpoint --beam-widths 10 --lm-weights 0.0,0.1,0.3,0.5,0.7
 
     # Against cleaned val
-    python -m src.replay_checkpoint --exclude runs/exp1/val_suspects.tsv
+    python -m arabicocr_khatt.replay_checkpoint --exclude runs/exp1/val_suspects.tsv
 """
 import argparse
 import os

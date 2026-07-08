@@ -1,4 +1,4 @@
-# src/metrics.py
+# arabicocr_khatt/metrics.py
 import re
 import unicodedata as ud
 from rapidfuzz.distance import Levenshtein

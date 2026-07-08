@@ -13,8 +13,8 @@ and ink ratio, sorted worst-first. Use this list to:
   - feed to --exclude in future eval runs (not wired up yet)
 
 Usage:
-    python -m src.flag_suspects
-    python -m src.flag_suspects --tsv runs/exp1/val_epoch_999_samples.tsv
+    python -m arabicocr_khatt.flag_suspects
+    python -m arabicocr_khatt.flag_suspects --tsv runs/exp1/val_epoch_999_samples.tsv
 """
 import argparse
 import csv

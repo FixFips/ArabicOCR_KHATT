@@ -1,4 +1,4 @@
-# src/webocr.py
+# arabicocr_khatt/webocr.py
 import html as _html
 import os
 import random
@@ -20,51 +20,24 @@ from .dataset import read_label
 from .metrics import cer as cer_raw, wer as wer_raw, dot_group_cer
 from .model import CRNN, ctc_greedy_decode, ctc_beam_decode, build_bigram_lm
 from .preprocess import to_grayscale, binarize, normalize, resize_keep_ratio_height, pad_width
+from .pipeline import (
+    HEIGHT, MAX_W, load_checkpoint, prep_line, segment_into_lines,
+)
 
 
 # ---------------- Config (match training) ----------------
-HEIGHT = 96
-MAX_W  = 1536
-CKPT   = "./runs/exp1/crnn_best.pt"
+CKPT   = os.environ.get("ARABICOCR_CKPT", "./runs/exp1/crnn_best.pt")
 SPLITS_DIR  = "./archive/splits"
 IMAGES_DIR  = "./archive/images"
 
 
 # ---------------- Checkpoint / charset helpers ----------------
 def load_vocab_from_ckpt(path: str):
-    state = torch.load(path, map_location="cpu", weights_only=False)
-    if "vocab" not in state:
-        raise RuntimeError("Checkpoint missing 'vocab'. Save as {'model':..., 'vocab':...}.")
+    state = load_checkpoint(path)
     vocab = state["vocab"]
     id2char = {i: c for i, c in enumerate(vocab)}
     use_attention = bool(state.get("use_attention", False))
     return vocab, id2char, state["model"], use_attention
-
-
-# ---------- Line preprocessing (uses same pipeline as training) ----------
-
-def prep_line(img: Image.Image, upscale: float = 1.0, force_invert: bool = False) -> Image.Image:
-    if upscale and upscale != 1.0:
-        w, h = img.size
-        img = img.resize((max(1, int(w * upscale)), max(1, int(h * upscale))), Image.BICUBIC)
-
-    if force_invert:
-        img = ImageOps.invert(img.convert("RGB"))
-
-    # Same pipeline as training: grayscale -> CLAHE+Otsu binarize -> normalize
-    img = to_grayscale(img)
-    img = binarize(img)
-
-    # Enforce black text on white bg
-    if np.asarray(img).mean() < 127:
-        img = ImageOps.invert(img)
-
-    img = normalize(img)
-    img = resize_keep_ratio_height(img, HEIGHT)
-    if img.width > MAX_W:
-        img = img.resize((MAX_W, HEIGHT), Image.LANCZOS)
-    img = pad_width(img, MAX_W)
-    return img
 
 
 # ---------------- Robust ImageEditor -> PIL conversion ----------------
@@ -107,66 +80,7 @@ def ensure_pil_from_editor(x: Any, use_cropped: bool = True) -> Image.Image:
     raise ValueError("Unsupported image format.")
 
 
-# ---------------- Multi-line segmentation (morphology) ----------------
-def _robust_binarize(pil_img: Image.Image) -> np.ndarray:
-    g = np.array(pil_img.convert("L"))
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    g = clahe.apply(g)
-    _, bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if (bw == 0).mean() < 0.12:
-        bw = 255 - bw
-    return bw
-
-def segment_into_lines(
-    pil_img: Image.Image,
-    min_h: int = 14,
-    min_width_ratio: float = 0.35,
-    remove_ruled_lines: bool = True
-) -> list[Image.Image]:
-    bw = _robust_binarize(pil_img)
-    text = 255 - bw
-    H, W = text.shape
-
-    if remove_ruled_lines:
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (max(W // 8, 80), 1))
-        rules = cv2.morphologyEx(text, cv2.MORPH_OPEN, k, iterations=1)
-        text = cv2.subtract(text, rules)
-
-    kx = max(W // 40, 20)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kx, 3))
-    smooth = cv2.dilate(text, kernel, iterations=1)
-
-    tiny_k = cv2.getStructuringElement(cv2.MORPH_RECT, (max(W // 90, 8), 3))
-    smooth = cv2.morphologyEx(smooth, cv2.MORPH_OPEN, tiny_k, iterations=1)
-
-    cc = (smooth > 0).astype(np.uint8)
-    num, labels, stats, _ = cv2.connectedComponentsWithStats(cc, connectivity=8)
-
-    boxes = []
-    for i in range(1, num):
-        x, y, w, h, area = stats[i]
-        if h < min_h:
-            continue
-        if w < int(W * min_width_ratio):
-            continue
-        if h > H * 0.35 and w < W * 0.60:
-            continue
-        boxes.append((y, x, w, h))
-
-    boxes.sort(key=lambda b: b[0])
-
-    merged = []
-    for y, x, w, h in boxes:
-        if merged and y - (merged[-1][0] + merged[-1][3]) < int(H * 0.02):
-            y0, x0, w0, h0 = merged[-1]
-            nx = min(x, x0); ny = min(y, y0)
-            nx2 = max(x + w, x0 + w0); ny2 = max(y + h, y0 + h0)
-            merged[-1] = (ny, nx, nx2 - nx, ny2 - ny)
-        else:
-            merged.append((y, x, w, h))
-
-    lines = [pil_img.crop((x, y, x + w, y + h)) for (y, x, w, h) in merged]
-    return lines or [pil_img]
+# Multi-line segmentation lives in pipeline.py (imported above).
 
 
 def stack_preview(imgs: List[Image.Image]) -> Image.Image:
@@ -343,6 +257,11 @@ def rotate_if_needed(pil: Image.Image, angle_deg: float) -> Image.Image:
 
 # ---------------- Model init ----------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if not os.path.exists(CKPT):
+    # No local checkpoint (e.g. HF Space / fresh clone): pull from the Hub.
+    from huggingface_hub import hf_hub_download
+    from .pipeline import DEFAULT_CKPT_FILENAME, DEFAULT_REPO_ID
+    CKPT = hf_hub_download(DEFAULT_REPO_ID, DEFAULT_CKPT_FILENAME)
 vocab, id2char, state_dict, _use_attn = load_vocab_from_ckpt(CKPT)
 char2id = {c: i for i, c in enumerate(vocab)}
 model = CRNN(num_classes=len(vocab), use_attention=_use_attn).to(device)
