@@ -5,7 +5,7 @@
 Arabic handwritten text recognition using CRNN-CTC trained on the KHATT dataset.
 Line-level OCR: one handwritten line image -> Arabic text output.
 
-- **Branch**: `Osama-Sharaf/improvement`
+- **Branch**: `main` (the `Osama-Sharaf/improvement` packaging branch was merged into `main`)
 - **Dataset**: KHATT, 11,375 line images in `archive/images/` + `archive/labels/`
 - **Vocabulary**: 75 classes (Arabic letters, digits, punctuation, special tokens)
 - **Framework**: PyTorch
@@ -14,11 +14,13 @@ Line-level OCR: one handwritten line image -> Arabic text output.
 
 ## Baseline vs Current
 
-| Metric | Old Baseline (v1, H=64) | Target (v2, H=96) |
-|--------|------------------------|-------------------|
-| CER | 12.2% | 4-7% |
-| WER | 42.4% | 20-30% |
-| DotCER | not measured | 8-12% |
+| Metric | Old Baseline (v1, H=64) | Target (v2, H=96) | Achieved (v2, `runs/exp1`) |
+|--------|------------------------|-------------------|----------------------------|
+| CER | 12.2% | 4-7% | **6.1%** (best 6.09% @ epoch 116) |
+| WER | 42.4% | 20-30% | **27.3%** |
+| DotCER | not measured | 8-12% | **8.3%** |
+
+**v2 training is complete.** The `runs/exp1` run finished all 120/120 epochs (OneCycleLR fully annealed, no early stop) on 2026-04-23; `crnn_best.pt` is the production checkpoint. All three metrics landed inside the target band. (A later `runs/exp3` arch-v3 transformer experiment was abandoned — it diverged by epoch 29 and its checkpoint is not usable.)
 
 The old v1 model had: no augmentation, no LR scheduler, only 1 BatchNorm, greedy-only decoding, H=64, MAX_W=1024, incomplete charset (2,624 chars lost to `<unk>`). All of these are fixed in v2.
 
