@@ -122,6 +122,9 @@ def main() -> int:
     ap.add_argument("--n", type=int, default=100_000)
     ap.add_argument("--noise-scale", type=float, default=1.0,
                     help="Multiply learned error rates (1.0 = match source CER).")
+    ap.add_argument("--clean-frac", type=float, default=0.15,
+                    help="Fraction of identity (clean->clean) pairs — teaches the "
+                         "corrector to leave correct text alone (anti-hallucination).")
     ap.add_argument("--out", default=str(ROOT / "archive/correction/pairs_train.tsv"))
     ap.add_argument("--seed", type=int, default=777)
     args = ap.parse_args()
@@ -157,9 +160,12 @@ def main() -> int:
         w.writerow(["noisy", "clean"])
         while n_written < args.n:
             clean = pool[int(rng.integers(len(pool)))]
-            noisy = model.corrupt(clean, rng, scale=args.noise_scale)
-            if not noisy.strip():
-                continue
+            if rng.random() < args.clean_frac:
+                noisy = clean  # identity pair: learn to abstain on correct text
+            else:
+                noisy = model.corrupt(clean, rng, scale=args.noise_scale)
+                if not noisy.strip():
+                    continue
             w.writerow([noisy, clean])
             inj_dist += Levenshtein.distance(clean, noisy)
             inj_len += len(clean)
