@@ -22,6 +22,15 @@ Line-level OCR: one handwritten line image -> Arabic text output.
 
 **v2 training is complete.** The `runs/exp1` run finished all 120/120 epochs (OneCycleLR fully annealed, no early stop) on 2026-04-23; `crnn_best.pt` is the production checkpoint. All three metrics landed inside the target band. (A later `runs/exp3` arch-v3 transformer experiment was abandoned — it diverged by epoch 29 and its checkpoint is not usable.)
 
+**Option A (synthetic data) round 1 — 2026-07-10.** 100k rendered lines (10 OFL font
+families) blended 35% into a 60-epoch warm-start run (`runs/exp2`), then a 15-epoch
+real-only fine-tune (`runs/exp2_ft`). Result on clean test, CER(n): exp1 5.94% →
+**exp2_ft 5.79%** (WER(n) 26.7→26.4, DotCER 7.96→7.66). Dot-group confusions improved
+(targeted oversampling worked); space errors did NOT move (likely labeling-convention
+ambiguity, not training variance); checkpoint soups gave zero gain. `runs/exp2_ft/crnn_best.pt`
+is the best local checkpoint but is NOT yet shipped — published PyPI/HF weights remain exp1.
+Labels are tatweel-stripped in exp2-family runs: compare runs via eval_val CER(n), never raw CER.
+
 The old v1 model had: no augmentation, no LR scheduler, only 1 BatchNorm, greedy-only decoding, H=64, MAX_W=1024, incomplete charset (2,624 chars lost to `<unk>`). All of these are fixed in v2.
 
 ## Architecture (v2 — Multi-Scale Vertical CRNN-CTC)
@@ -84,24 +93,39 @@ T=385 timesteps vs max label length 132 chars = 2.9x ratio (CTC needs T >= label
 arabicocr_khatt/
   pipeline.py         -- ArabicOCR inference API + CLI (single source for inference)
   model.py            -- CRNN architecture + CTC decoders (greedy + beam) + bigram LM builder
-  augment.py          -- ArabicAugment class (dot-safe transforms only)
-  train_crnn_ctc.py   -- Training loop (OneCycleLR, grad accum, early stopping, test eval)
-  dataset.py          -- KHATTDataset (PyTorch Dataset, augment hook)
+  augment.py          -- ArabicAugment class (dot-safe transforms only, incl. word-space jitter)
+  synthetic.py        -- Synthetic handwriting renderer (uharfbuzz + freetype + degradations)
+  train_crnn_ctc.py   -- Training loop (OneCycleLR, grad accum, early stopping, test eval,
+                         synth mixing, warm start, top-k checkpoints)
+  dataset.py          -- KHATTDataset (PyTorch Dataset, augment hook, inline-label CSVs)
   preprocess.py       -- CLAHE + dual-polarity Otsu binarization, LANCZOS resize, padding
   metrics.py          -- CER, WER, dot-group CER
-  webocr.py           -- Gradio web demo (beam search, line segmentation)
+  eval_val.py         -- Standalone checkpoint eval on train/val/test (writes eval TSVs)
+  flag_suspects.py    -- Surface mislabeled/corrupt samples by CER threshold
+  replay_checkpoint.py-- Decoder sweeps on an existing checkpoint
+  compare_runs.py     -- Multi-run metrics comparison (head-to-head table)
+  dict_ceiling.py     -- Oracle CER ceiling of lexicon-based correction
+  monitor.py          -- Local web dashboard for a training run
+  webocr.py           -- Gradio web demo / test bench (beam search, line segmentation)
   charset_arabic.txt  -- 70 characters + 5 special tokens = 75 classes
   show_metrics.py     -- CLI tool to view training metrics from CSV
   __init__.py         -- Package init (empty)
-archive/              -- (gitignored) KHATT dataset
+scripts/
+  download_fonts.py   -- Fetch OFL Arabic fonts (10 families) into archive/fonts/
+  generate_synth.py   -- Generate the synthetic training set (default 100k lines)
+  avg_checkpoints.py  -- Average top-k checkpoints into a "model soup"
+archive/              -- (gitignored) KHATT dataset + derived data
   images/             -- 11,375 line images (JPG, RGB, mean 2006x136px)
   labels/             -- 11,375 text labels (TXT, windows-1256 encoding)
   splits/             -- Auto-generated train/val/test CSV files (80/10/10)
-runs/exp1/            -- (gitignored) Training outputs
+  fonts/              -- OFL .ttf fonts for synthesis (download_fonts.py)
+  synth/              -- Synthetic lines: images/ + synth.csv (filename,label,family,kind)
+runs/exp1/            -- (gitignored) v2 run-2 training outputs
   crnn_best.pt        -- Best model checkpoint (by val CER)
   metrics.csv         -- Per-epoch training log
 research/archive/
   train_trocr_char.py -- Archived TrOCR experiment (not used)
+space/                -- Hugging Face Space (installs arabicocr-khatt from PyPI)
 ```
 
 ## Import Dependency Graph (no cycles)
@@ -119,8 +143,8 @@ webocr.py         -- imports model, preprocess
 ## Commands
 
 ```bash
-# Install (editable, with training + demo extras)
-pip install -e ".[train,demo]"
+# Install (editable, with training + demo + synthesis extras)
+pip install -e ".[train,demo,synth]"
 
 # Recognize an image with published weights
 arabicocr page.jpg
@@ -133,7 +157,32 @@ python -m arabicocr_khatt.show_metrics --run ./runs/exp1
 
 # Launch web demo (requires trained checkpoint at runs/exp1/crnn_best.pt)
 python -m arabicocr_khatt.webocr
+
+# --- Option A: synthetic data workflow ---
+# 1. Fonts (once)
+python scripts/download_fonts.py
+# 2. Generate 100k synthetic lines (multiprocess, ~25 min)
+python scripts/generate_synth.py --n 100000 --procs 8
+# 3. Warm-start blend training (60 epochs, 35% synth per batch)
+python -m arabicocr_khatt.train_crnn_ctc --run-dir runs/exp2 \
+    --warm-start runs/exp1/crnn_best.pt --synth-csv archive/synth/synth.csv \
+    --synth-ratio 0.35 --max-lr 3e-4 --epochs 60 --save-topk 5 --strip-tatweel \
+    --exclude runs/exp1/train_suspects.tsv --exclude runs/exp1/val_suspects.tsv \
+    --exclude runs/exp1/test_suspects.tsv
+# 4. Real-only fine-tune (15 epochs, tiny LR)
+python -m arabicocr_khatt.train_crnn_ctc --run-dir runs/exp2_ft \
+    --warm-start runs/exp2/crnn_best.pt --max-lr 1e-5 --epochs 15 \
+    --save-topk 5 --strip-tatweel \
+    --exclude runs/exp1/train_suspects.tsv --exclude runs/exp1/val_suspects.tsv \
+    --exclude runs/exp1/test_suspects.tsv
+# 5. Optional: average top-k checkpoints, then evaluate
+python scripts/avg_checkpoints.py runs/exp2_ft/crnn_ep*.pt --out runs/exp2_ft/crnn_soup.pt
+python -m arabicocr_khatt.eval_val --ckpt runs/exp2_ft/crnn_soup.pt --split test
 ```
+
+Note on `--strip-tatweel`: raw CER from tatweel-stripped runs is not directly
+comparable to exp1 raw CER; compare runs with CER(n) (eval_val's normalized
+metric strips tatweel in both).
 
 ## Training Configuration
 

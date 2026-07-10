@@ -30,3 +30,6 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+
+# Claude Code local session settings
+.claude/
