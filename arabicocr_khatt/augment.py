@@ -33,28 +33,39 @@ class ArabicAugment:
         arr = np.array(img, dtype=np.uint8)  # binarized grayscale
 
         # 1) Affine shear — slants all features equally, dots stay above/below their letter
-        if random.random() < 0.4:
+        if random.random() < 0.5:
             arr = self._shear(arr)
 
         # 2) Slight rotation — within ±2° dots keep their letter association
-        if random.random() < 0.3:
+        if random.random() < 0.4:
             arr = self._rotate(arr)
 
         # 3) Kashida (tatweel) stretch — uniquely Arabic horizontal elongation
         #    Stretches connections between letters; dots sit above/below and are unaffected
-        if random.random() < 0.3:
+        if random.random() < 0.4:
             arr = self._kashida_stretch(arr)
 
-        # 4) Vertical baseline shift — simulates off-center writing
+        # 4) Word-space jitter — stretch/shrink white gaps between components.
+        #    Space del/ins is 24% of all test edit ops (run-2 error decomposition);
+        #    this teaches the model that gap width is unreliable. Dots untouched:
+        #    only all-white column runs are rescaled.
+        if random.random() < 0.4:
+            arr = self._space_jitter(arr)
+
+        # 5) Global width jitter — writing-density variance (±10%)
+        if random.random() < 0.4:
+            arr = self._width_jitter(arr)
+
+        # 6) Vertical baseline shift — simulates off-center writing
         if random.random() < 0.2:
             arr = self._vertical_shift(arr)
 
-        # 5) Brightness/contrast jitter — simulates paper/ink variation
+        # 7) Brightness/contrast jitter — simulates paper/ink variation
         if random.random() < 0.3:
             arr = self._brightness_jitter(arr)
 
-        # 6) Mild Gaussian noise — scanner/paper noise at safe levels
-        if random.random() < 0.2:
+        # 8) Mild Gaussian noise — scanner/paper noise at safe levels
+        if random.random() < 0.3:
             arr = self._gaussian_noise(arr)
 
         # Re-binarize to maintain clean binary format
@@ -116,8 +127,57 @@ class ArabicAugment:
         result[:, start:start + new_region_w] = stretched
         result[:, start + new_region_w:] = arr[:, end:]
 
-        # Resize back to original width to maintain consistency
-        return cv2.resize(result, (w, h), interpolation=cv2.INTER_LINEAR)
+        # Keep the new width: resizing back would horizontally compress the
+        # whole line and partially cancel the stretch. Downstream resize/pad
+        # (H=96, W=1536) absorbs the width change.
+        return result
+
+    @staticmethod
+    def _space_jitter(arr: np.ndarray) -> np.ndarray:
+        """Rescale white column-runs (word/letter gaps) by 0.5-1.8x each.
+
+        Operates only on fully-white column runs, so ink (and dots) is never
+        resampled. Border margins are skipped; total width growth is capped.
+        """
+        h, w = arr.shape[:2]
+        white = (arr > 200).all(axis=0)
+        if not white.any() or white.all():
+            return arr
+
+        # find runs of white columns
+        padded = np.concatenate([[False], white, [False]])
+        starts = np.flatnonzero(~padded[:-1] & padded[1:])
+        ends = np.flatnonzero(padded[:-1] & ~padded[1:])
+
+        min_gap = max(3, int(0.04 * h))
+        pieces = []
+        prev = 0
+        budget = int(0.3 * w)  # cap total growth at +30%
+        for s, e in zip(starts, ends):
+            gap = e - s
+            if s == 0 or e == w or gap < min_gap or random.random() > 0.5:
+                continue
+            new_gap = max(1, int(gap * random.uniform(0.5, 1.8)))
+            grow = new_gap - gap
+            if grow > 0:
+                if grow > budget:
+                    continue
+                budget -= grow
+            pieces.append(arr[:, prev:s])
+            pieces.append(np.full((h, new_gap), 255, dtype=np.uint8))
+            prev = e
+        if not pieces:
+            return arr
+        pieces.append(arr[:, prev:])
+        return np.hstack(pieces)
+
+    @staticmethod
+    def _width_jitter(arr: np.ndarray) -> np.ndarray:
+        h, w = arr.shape[:2]
+        new_w = max(8, int(w * random.uniform(0.9, 1.1)))
+        if new_w == w:
+            return arr
+        return cv2.resize(arr, (new_w, h), interpolation=cv2.INTER_LINEAR)
 
     @staticmethod
     def _vertical_shift(arr: np.ndarray) -> np.ndarray:

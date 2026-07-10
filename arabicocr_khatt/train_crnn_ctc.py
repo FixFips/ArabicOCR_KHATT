@@ -24,7 +24,7 @@ from sklearn.model_selection import train_test_split
 
 from .dataset import KHATTDataset
 from .metrics import cer as cer_raw, wer as wer_raw, dot_group_cer
-from .model import CRNN, text_to_ids, ids_to_text, ctc_greedy_decode, ctc_beam_decode, build_bigram_lm
+from .model import CRNN, text_to_ids, ids_to_text, ctc_greedy_decode, ctc_beam_decode
 from .augment import ArabicAugment
 
 # ---------------- Config ----------------
@@ -172,6 +172,32 @@ def main():
                              "to <dir>_<timestamp> before starting a fresh run.")
     parser.add_argument("--attention", action="store_true",
                         help="Arch v3: add one transformer encoder layer after BiLSTM for global context.")
+    parser.add_argument("--synth-csv", default=None,
+                        help="Synthetic data CSV (filename,label,...); images resolved in "
+                             "<csv dir>/images. Mixed into training via --synth-ratio.")
+    parser.add_argument("--synth-ratio", type=float, default=0.35,
+                        help="Expected fraction of synthetic samples per batch (default 0.35).")
+    parser.add_argument("--warm-start", default=None,
+                        help="Checkpoint to initialize model weights from (e.g. runs/exp1/crnn_best.pt).")
+    parser.add_argument("--max-lr", type=float, default=3e-3,
+                        help="OneCycleLR max_lr (default 3e-3; use 3e-4 for warm-start, 1e-5 for fine-tune).")
+    parser.add_argument("--epochs", type=int, default=EPOCHS,
+                        help=f"Number of epochs (default {EPOCHS}).")
+    parser.add_argument("--save-topk", type=int, default=1,
+                        help="Keep the K best checkpoints by val CER as crnn_epNNN.pt "
+                             "(for weight averaging). crnn_best.pt is always maintained.")
+    parser.add_argument("--amp", action="store_true",
+                        help="bf16 autocast for model forward passes (CTC loss stays fp32). "
+                             "~1.5-2x faster epochs on RTX 5080; use for new long runs, not "
+                             "mid-experiment recipe comparisons.")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="DataLoader workers (default 4, persistent). Smooths JPG-decode/"
+                             "augment stalls; set 2 to reproduce the exp1/exp2 recipe exactly.")
+    parser.add_argument("--strip-tatweel", action="store_true",
+                        help="Strip tatweel (U+0640) from all labels. The model never learns to "
+                             "emit it (109 forced deletions on train in run 2); removing it removes "
+                             "label noise. Raw CER is then not directly comparable to older runs — "
+                             "compare with CER(n) from eval_val.")
     args = parser.parse_args()
 
     # Apply --run-dir override to module globals so downstream code picks it up
@@ -215,18 +241,52 @@ def main():
     train_ds = KHATTDataset(
         train_csv, IMAGES_DIR,
         mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W, augment=aug,
+        strip_tatweel=args.strip_tatweel,
     )
     val_ds = KHATTDataset(
         val_csv, IMAGES_DIR,
         mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W,
+        strip_tatweel=args.strip_tatweel,
     )
 
     collate = CRNNCollate(char2id, unk_id)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=2, pin_memory=True, collate_fn=collate)
+    # --- Optional synthetic mixing (Option A) ---
+    # ConcatDataset + WeightedRandomSampler so each batch is an iid mix with
+    # P(synth) = --synth-ratio. num_samples keeps the expected number of REAL
+    # samples per epoch at len(train_ds), so "epoch" stays comparable.
+    if args.synth_csv:
+        from torch.utils.data import ConcatDataset, WeightedRandomSampler
+        synth_dir = os.path.dirname(os.path.abspath(args.synth_csv))
+        synth_ds = KHATTDataset(
+            args.synth_csv, os.path.join(synth_dir, "images"),
+            mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W, augment=aug,
+            strip_tatweel=args.strip_tatweel,
+        )
+        r = args.synth_ratio
+        if not 0.0 < r < 1.0:
+            raise SystemExit(f"--synth-ratio must be in (0,1), got {r}")
+        weights = torch.cat([
+            torch.full((len(train_ds),), (1.0 - r) / len(train_ds), dtype=torch.double),
+            torch.full((len(synth_ds),), r / len(synth_ds), dtype=torch.double),
+        ])
+        num_samples = int(round(len(train_ds) / (1.0 - r)))
+        sampler = WeightedRandomSampler(weights, num_samples=num_samples, replacement=True)
+        mixed_ds = ConcatDataset([train_ds, synth_ds])
+        train_loader = DataLoader(mixed_ds, batch_size=BATCH_SIZE, sampler=sampler,
+                                  num_workers=args.workers, pin_memory=True,
+                                  persistent_workers=args.workers > 0, collate_fn=collate)
+        print(f"Mixed training: {len(train_ds)} real + {len(synth_ds)} synth, "
+              f"P(synth)={r:.2f}, {num_samples} samples/epoch "
+              f"({math.ceil(num_samples / BATCH_SIZE)} batches)")
+    else:
+        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                                  num_workers=args.workers, pin_memory=True,
+                                  persistent_workers=args.workers > 0, collate_fn=collate)
+
     val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                              num_workers=2, pin_memory=True, collate_fn=collate)
+                              num_workers=args.workers, pin_memory=True,
+                              persistent_workers=args.workers > 0, collate_fn=collate)
 
     torch.backends.cudnn.benchmark = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -237,16 +297,27 @@ def main():
     print(f"Model parameters: {total_params:,}  |  arch_version={arch_version}"
           f"{' (with transformer encoder layer)' if args.attention else ''}")
 
+    # --- Warm start from an existing checkpoint (Option A blend training) ---
+    if args.warm_start:
+        state = torch.load(args.warm_start, map_location=device, weights_only=False)
+        if state.get("vocab") != vocab:
+            raise SystemExit(f"--warm-start vocab mismatch: checkpoint has "
+                             f"{len(state.get('vocab', []))} classes, charset has {len(vocab)}")
+        model.load_state_dict(state["model"])
+        print(f"Warm-started from {args.warm_start} "
+              f"(arch_version={state.get('arch_version', '?')})")
+
     criterion = nn.CTCLoss(blank=0, zero_infinity=True)
     optimizer = optim.AdamW(model.parameters(), lr=LR)
 
     # --- OneCycleLR scheduler ---
     # ceil division: accounts for the tail batch when len(train_loader) % GRAD_ACCUM != 0
+    epochs = args.epochs
     steps_per_epoch = math.ceil(len(train_loader) / GRAD_ACCUM)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=3e-3,
-        epochs=EPOCHS,
+        max_lr=args.max_lr,
+        epochs=epochs,
         steps_per_epoch=steps_per_epoch,
         pct_start=0.1,
         anneal_strategy="cos",
@@ -254,10 +325,23 @@ def main():
         final_div_factor=100,
     )
 
+    # bf16 autocast: model forward only. logits are cast back to fp32 before
+    # log_softmax/CTC (CTC is numerically fragile below fp32). bf16 needs no
+    # GradScaler (fp32-range exponent).
+    use_amp = args.amp and device.type == "cuda"
+
+    def autocast_ctx():
+        return torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp)
+
+    # Parsed by the monitor dashboard for progress/ETA — keep the format stable.
+    print(f"Epochs: {epochs} | max_lr={args.max_lr:g} | steps/epoch={steps_per_epoch} | "
+          f"amp={'bf16' if use_amp else 'off'} | workers={args.workers}")
+
     best_cer = float("inf")
     patience_counter = 0
+    topk_ckpts: list[tuple[float, str]] = []  # (cer, path), worst last
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(1, epochs + 1):
         t0 = time.perf_counter()
 
         # ---- train ----
@@ -267,8 +351,9 @@ def main():
 
         for step, (imgs, targets, target_lengths, _) in enumerate(train_loader):
             imgs = imgs.to(device, non_blocking=True)
-            logits = model(imgs)
-            log_probs = logits.log_softmax(2)
+            with autocast_ctx():
+                logits = model(imgs)
+            log_probs = logits.float().log_softmax(2)
             T, B, _ = logits.shape
             input_lengths = torch.full((B,), T, dtype=torch.long, device=device)
             targets_d = targets.to(device, non_blocking=True)
@@ -298,8 +383,9 @@ def main():
         with torch.no_grad():
             for imgs, _, _, texts_ref in val_loader:
                 imgs = imgs.to(device, non_blocking=True)
-                logits = model(imgs)
-                hyps_ltr = ctc_greedy_decode(logits, id2char)
+                with autocast_ctx():
+                    logits = model(imgs)
+                hyps_ltr = ctc_greedy_decode(logits.float(), id2char)
                 hyps_rtl = [h[::-1] for h in hyps_ltr]
 
                 for r, h in zip(texts_ref, hyps_rtl):
@@ -339,14 +425,12 @@ def main():
         # ---- checkpoint & early stopping ----
         ckpt_saved = False
         should_stop = False
+        ckpt_payload = {"model": model.state_dict(), "vocab": vocab,
+                        "arch_version": arch_version, "use_attention": args.attention}
         if mcer < best_cer:
             best_cer = mcer
             patience_counter = 0
-            torch.save(
-                {"model": model.state_dict(), "vocab": vocab,
-                 "arch_version": arch_version, "use_attention": args.attention},
-                os.path.join(RUN_DIR, "crnn_best.pt"),
-            )
+            torch.save(ckpt_payload, os.path.join(RUN_DIR, "crnn_best.pt"))
             ckpt_saved = True
             print(f"  -> Saved best model (CER={best_cer:.4f})")
         else:
@@ -354,6 +438,19 @@ def main():
             if patience_counter >= PATIENCE:
                 print(f"  -> Early stopping after {PATIENCE} epochs without improvement")
                 should_stop = True
+
+        # ---- top-K checkpoint pool (for post-hoc weight averaging) ----
+        if args.save_topk > 1 and (len(topk_ckpts) < args.save_topk or mcer < topk_ckpts[-1][0]):
+            path = os.path.join(RUN_DIR, f"crnn_ep{epoch:03d}.pt")
+            torch.save(ckpt_payload, path)
+            topk_ckpts.append((mcer, path))
+            topk_ckpts.sort(key=lambda t: t[0])
+            while len(topk_ckpts) > args.save_topk:
+                _, worst_path = topk_ckpts.pop()
+                try:
+                    os.unlink(worst_path)
+                except OSError:
+                    pass
 
         # Always log metrics (even the final epoch before early stop)
         _append_metrics(
@@ -377,38 +474,29 @@ def main():
         model.load_state_dict(state["model"])
         model.eval()
 
-        # Build bigram LM from training labels (from filtered train split if --exclude was used)
-        print("Building Arabic bigram LM from training labels...")
-        from .dataset import read_label
-        train_df = pd.read_csv(train_csv)
-        train_texts = []
-        for _, row in train_df.iterrows():
-            try:
-                train_texts.append(read_label(row["label_path"]))
-            except Exception:
-                pass
-        bigram_lm = build_bigram_lm(train_texts, char2id)
-        print(f"  Bigram LM: {len(bigram_lm)} entries")
-
-        test_ds = KHATTDataset(test_csv, IMAGES_DIR, mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W)
+        test_ds = KHATTDataset(test_csv, IMAGES_DIR, mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W,
+                               strip_tatweel=args.strip_tatweel)
         test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False,
-                                 num_workers=2, pin_memory=True, collate_fn=collate)
+                                 num_workers=args.workers, pin_memory=True, collate_fn=collate)
 
-        # Evaluate with both greedy and beam search
-        for decode_name, decode_fn in [("Greedy", None), ("Beam(10)", bigram_lm)]:
+        # Greedy + beam(5) without LM: the run-2 decoder sweep showed beam>=5
+        # saturates and the train-only bigram LM hurts (see project memory).
+        for decode_name, decode_fn in [("Greedy", None), ("Beam(5)", "beam")]:
             tcer = []; twer = []; twer_norm = []
             t_refs = []; t_hyps = []
 
             with torch.no_grad():
                 for imgs, _, _, texts_ref in test_loader:
                     imgs = imgs.to(device, non_blocking=True)
-                    logits = model(imgs)
+                    with autocast_ctx():
+                        logits = model(imgs)
+                    logits = logits.float()
 
                     if decode_fn is None:
                         hyps_ltr = ctc_greedy_decode(logits, id2char)
                     else:
-                        hyps_ltr = ctc_beam_decode(logits, id2char, beam_width=10,
-                                                   bigram_lm=decode_fn, lm_weight=0.3)
+                        hyps_ltr = ctc_beam_decode(logits, id2char, beam_width=5,
+                                                   bigram_lm=None, lm_weight=0.0)
 
                     hyps_rtl = [h[::-1] for h in hyps_ltr]
                     for r, h in zip(texts_ref, hyps_rtl):

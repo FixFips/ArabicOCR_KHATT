@@ -25,7 +25,7 @@ def read_label(path: str) -> str:
 class KHATTDataset(Dataset):
     def __init__(self, csv_path: str, images_dir: str,
                  mode: str = "crnn", crnn_h: int = 96, crnn_max_w: int = 1536,
-                 trocr_side: int = 384, augment=None):
+                 trocr_side: int = 384, augment=None, strip_tatweel: bool = False):
         self.df = pd.read_csv(csv_path)
         self.images_dir = images_dir
         self.mode = mode
@@ -33,6 +33,9 @@ class KHATTDataset(Dataset):
         self.crnn_max_w = crnn_max_w
         self.trocr_side = trocr_side
         self.augment = augment
+        self.strip_tatweel = strip_tatweel
+        # Synthetic CSVs carry the label inline (no per-line .txt files)
+        self.has_inline_label = "label" in self.df.columns
 
     def __len__(self):
         return len(self.df)
@@ -40,7 +43,7 @@ class KHATTDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         img_path = os.path.join(self.images_dir, row["filename"])
-        label_path = row["label_path"]
+        label_path = row["label_path"] if "label_path" in self.df.columns else None
 
         img = Image.open(img_path)
         img = to_grayscale(img)
@@ -59,5 +62,10 @@ class KHATTDataset(Dataset):
         else:
             img = pad_to_square(img, self.trocr_side)
 
-        label = read_label(label_path)
+        if self.has_inline_label and isinstance(row["label"], str):
+            label = _WS_RUN.sub(" ", row["label"]).strip()
+        else:
+            label = read_label(label_path)
+        if self.strip_tatweel:
+            label = _WS_RUN.sub(" ", label.replace("ـ", "")).strip()
         return img, label
