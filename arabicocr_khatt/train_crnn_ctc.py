@@ -207,6 +207,9 @@ def main():
                              "and text-deduped, see scripts/build_strict_splits.py).")
     parser.add_argument("--seed", type=int, default=SEED,
                         help=f"Random seed (default {SEED}). Use 3 seeds to measure run-to-run noise.")
+    parser.add_argument("--aux-ctc", type=float, default=0.0,
+                        help="Weight of the CTC-shortcut auxiliary loss (arXiv 2404.11339 uses 0.1). "
+                             "0 disables it. The shortcut head is training-only.")
     parser.add_argument("--legacy-reverse", action="store_true",
                         help="Reverse labels with plain t[::-1] (exp1/exp2 recipe). Default is "
                              "bidi_flip, which keeps digit runs in visual order.")
@@ -305,7 +308,7 @@ def main():
     torch.backends.cudnn.benchmark = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device, torch.cuda.get_device_name(0) if device.type == "cuda" else "")
-    model = CRNN(num_classes, use_attention=args.attention).to(device)
+    model = CRNN(num_classes, use_attention=args.attention, aux_ctc=args.aux_ctc > 0).to(device)
     arch_version = 3 if args.attention else 2
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}  |  arch_version={arch_version}"
@@ -317,7 +320,7 @@ def main():
         if state.get("vocab") != vocab:
             raise SystemExit(f"--warm-start vocab mismatch: checkpoint has "
                              f"{len(state.get('vocab', []))} classes, charset has {len(vocab)}")
-        model.load_state_dict(state["model"])
+        model.load_state_dict(state["model"], strict=not args.aux_ctc)  # shortcut not in ckpt
         print(f"Warm-started from {args.warm_start} "
               f"(arch_version={state.get('arch_version', '?')})")
 
@@ -374,6 +377,9 @@ def main():
             target_lengths_d = target_lengths.to(device, non_blocking=True)
 
             loss = criterion(log_probs, targets_d, input_lengths, target_lengths_d)
+            if model.aux_logits is not None:
+                aux_lp = model.aux_logits.float().log_softmax(2)
+                loss = loss + args.aux_ctc * criterion(aux_lp, targets_d, input_lengths, target_lengths_d)
             loss = loss / GRAD_ACCUM
             loss.backward()
             tr_loss += float(loss.item()) * GRAD_ACCUM
@@ -439,7 +445,9 @@ def main():
         # ---- checkpoint & early stopping ----
         ckpt_saved = False
         should_stop = False
-        ckpt_payload = {"model": model.state_dict(), "vocab": vocab,
+        # shortcut head is training-only: strip it so checkpoints load into plain CRNN
+        ckpt_payload = {"model": {k: v for k, v in model.state_dict().items()
+                                  if not k.startswith("shortcut.")}, "vocab": vocab,
                         "arch_version": arch_version, "use_attention": args.attention,
                         "label_order": "reverse" if args.legacy_reverse else "bidi"}
         if mcer < best_cer:
@@ -486,7 +494,7 @@ def main():
     if test_csv.exists():
         # Reload best checkpoint
         state = torch.load(os.path.join(RUN_DIR, "crnn_best.pt"), map_location=device, weights_only=False)
-        model.load_state_dict(state["model"])
+        model.load_state_dict(state["model"], strict=not args.aux_ctc)  # shortcut not in ckpt
         model.eval()
 
         test_ds = KHATTDataset(test_csv, IMAGES_DIR, mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W,

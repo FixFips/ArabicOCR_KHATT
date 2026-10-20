@@ -25,7 +25,7 @@ class CRNN(nn.Module):
         -> Dropout -> FC -> (T, B, num_classes)
     """
 
-    def __init__(self, num_classes: int, use_attention: bool = False):
+    def __init__(self, num_classes: int, use_attention: bool = False, aux_ctc: bool = False):
         super().__init__()
         self.use_attention = use_attention
         # --- CNN feature extractor (full BatchNorm for dot-feature parity) ---
@@ -87,6 +87,13 @@ class CRNN(nn.Module):
             self.attn = None
         self.fc_drop = nn.Dropout(0.3)
         self.fc = nn.Linear(384 * 2, num_classes)  # bidirectional → 768
+        # --- Optional CTC shortcut (Retsinas et al., arXiv 2404.11339) ---
+        # A 1D conv straight from CNN features to classes, trained with a small
+        # auxiliary CTC loss. Gives the CNN a direct gradient path; IAM 4.93 ->
+        # 4.62 CER. Training-only: its weights are stripped from checkpoints
+        # (see train_crnn_ctc), so inference code never sees it.
+        self.shortcut = nn.Conv1d(512 * 3, num_classes, 3, padding=1) if aux_ctc else None
+        self.aux_logits = None
 
     def forward(self, x):                           # [B, 1, H, W]
         x = self.cnn(x)                             # [B, 512, H', W']
@@ -94,6 +101,8 @@ class CRNN(nn.Module):
         # Preserve 3 vertical zones (above-baseline / baseline / below-baseline)
         x = F.adaptive_avg_pool2d(x, (3, W))        # [B, 512, 3, W']
         x = x.view(B, C * 3, W).permute(0, 2, 1)   # [B, W', 1536]
+        if self.shortcut is not None and self.training:
+            self.aux_logits = self.shortcut(x.permute(0, 2, 1)).permute(2, 0, 1)  # [T, B, C]
         x, _ = self.rnn(x)                          # [B, W', 768]
         if self.attn is not None:
             x = self.attn(x)                        # [B, W', 768] — global context
