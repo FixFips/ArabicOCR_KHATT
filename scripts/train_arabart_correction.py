@@ -45,6 +45,35 @@ class PairsDataset(Dataset):
         return {"noisy": noisy, "clean": clean}
 
 
+class PairsCollate:
+    """Top-level picklable collate — Windows DataLoader workers use spawn
+    and cannot pickle closures (same reason dataset.py has CRNNCollate)."""
+
+    def __init__(self, tokenizer, max_len: int):
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __call__(self, batch):
+        noisy = [b["noisy"] for b in batch]
+        clean = [b["clean"] for b in batch]
+        enc = self.tokenizer(noisy, max_length=self.max_len, truncation=True,
+                             padding=True, return_tensors="pt")
+        # AraBART's BarthezTokenizer does NOT append eos on text_target —
+        # without it the decoder never learns to stop and generation runs to
+        # max_length (observed: eval CER ~10x worse than no-op). Append eos
+        # manually and pad labels with -100 directly.
+        tgt = self.tokenizer(text_target=clean, max_length=self.max_len - 1,
+                             truncation=True)["input_ids"]
+        eos = self.tokenizer.eos_token_id
+        tgt = [t + [eos] if (not t or t[-1] != eos) else t for t in tgt]
+        width = max(len(t) for t in tgt)
+        labels = torch.full((len(tgt), width), -100, dtype=torch.long)
+        for i, t in enumerate(tgt):
+            labels[i, : len(t)] = torch.tensor(t, dtype=torch.long)
+        enc["labels"] = labels
+        return enc
+
+
 def cer(ref: str, hyp: str) -> float:
     return Levenshtein.distance(ref, hyp) / max(len(ref), 1)
 
@@ -76,13 +105,7 @@ def main() -> int:
     print(f"train pairs: {len(train_ds):,} | dev pairs: {len(dev_ds):,} "
           f"| dev no-op CER (uncorrected): {noop_cer*100:.2f}%")
 
-    def collate(batch):
-        noisy = [b["noisy"] for b in batch]
-        clean = [b["clean"] for b in batch]
-        enc = tokenizer(noisy, text_target=clean, max_length=args.max_len,
-                        truncation=True, padding=True, return_tensors="pt")
-        enc["labels"][enc["labels"] == tokenizer.pad_token_id] = -100
-        return enc
+    collate = PairsCollate(tokenizer, args.max_len)
 
     def compute_metrics(eval_pred):
         preds, _ = eval_pred
@@ -114,6 +137,7 @@ def main() -> int:
         generation_num_beams=1,      # greedy during training evals (speed);
                                      # final eval uses beams via eval_correction.py
         dataloader_num_workers=args.workers,
+        remove_unused_columns=False,  # our collate consumes raw {noisy, clean} dicts
         report_to=[],
         seed=42,
     )
