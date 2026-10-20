@@ -24,7 +24,7 @@ from sklearn.model_selection import train_test_split
 
 from .dataset import KHATTDataset
 from .metrics import cer as cer_raw, wer as wer_raw, dot_group_cer
-from .model import CRNN, text_to_ids, ids_to_text, ctc_greedy_decode, ctc_beam_decode
+from .model import CRNN, text_to_ids, ids_to_text, ctc_greedy_decode, ctc_beam_decode, bidi_flip, plain_reverse
 from .augment import ArabicAugment
 
 # ---------------- Config ----------------
@@ -145,14 +145,17 @@ def _append_metrics(epoch, train_loss, cer, wer, wer_n, dot_cer, train_batches, 
 # ------------- Collate (must be top-level for Windows multiprocessing) -------------
 class CRNNCollate:
     """Picklable collate function for Windows DataLoader workers."""
-    def __init__(self, char2id, unk_id):
+    def __init__(self, char2id, unk_id, legacy_reverse=False):
         self.char2id = char2id
         self.unk_id = unk_id
+        self.legacy_reverse = legacy_reverse
         self.to_tensor = transforms.ToTensor()
 
     def __call__(self, batch):
         imgs, texts_orig = zip(*batch)
-        texts_ltr = [t[::-1] for t in texts_orig]     # LTR time-axis
+        # LTR time-axis; bidi_flip keeps digit/Latin runs in visual order
+        flip = plain_reverse if self.legacy_reverse else bidi_flip
+        texts_ltr = [flip(t) for t in texts_orig]
         imgs = torch.stack([self.to_tensor(im) for im in imgs], dim=0)
         targets = [torch.tensor(text_to_ids(t, self.char2id, self.unk_id), dtype=torch.long) for t in texts_ltr]
         target_lengths = torch.tensor([len(t) for t in targets], dtype=torch.long)
@@ -161,7 +164,7 @@ class CRNNCollate:
 
 # ------------- Train -------------
 def main():
-    global RUN_DIR, LOG_FILE, CKPT_PATH
+    global RUN_DIR, LOG_FILE, CKPT_PATH, SPLITS_DIR
     parser = argparse.ArgumentParser(description="Train Arabic CRNN-CTC on KHATT")
     parser.add_argument("--exclude", action="append", default=[],
                         help="TSV with 'filename' column; rows are dropped from all splits. Repeatable.")
@@ -198,7 +201,18 @@ def main():
                              "emit it (109 forced deletions on train in run 2); removing it removes "
                              "label noise. Raw CER is then not directly comparable to older runs — "
                              "compare with CER(n) from eval_val.")
+    parser.add_argument("--splits-dir", default=SPLITS_DIR,
+                        help="Directory with train/val/test CSVs (default ./archive/splits, the "
+                             "legacy random split; ./archive/splits_strict is writer-disjoint "
+                             "and text-deduped, see scripts/build_strict_splits.py).")
+    parser.add_argument("--seed", type=int, default=SEED,
+                        help=f"Random seed (default {SEED}). Use 3 seeds to measure run-to-run noise.")
+    parser.add_argument("--legacy-reverse", action="store_true",
+                        help="Reverse labels with plain t[::-1] (exp1/exp2 recipe). Default is "
+                             "bidi_flip, which keeps digit runs in visual order.")
     args = parser.parse_args()
+    SPLITS_DIR = args.splits_dir
+    flip = plain_reverse if args.legacy_reverse else bidi_flip
 
     # Apply --run-dir override to module globals so downstream code picks it up
     RUN_DIR = args.run_dir
@@ -214,7 +228,7 @@ def main():
 
     os.makedirs(RUN_DIR, exist_ok=True)
     _init_metrics_file()
-    set_seed(SEED)
+    set_seed(args.seed)
     if not Path(SPLITS_DIR, "train.csv").exists():
         build_splits()
 
@@ -249,7 +263,7 @@ def main():
         strip_tatweel=args.strip_tatweel,
     )
 
-    collate = CRNNCollate(char2id, unk_id)
+    collate = CRNNCollate(char2id, unk_id, legacy_reverse=args.legacy_reverse)
 
     # --- Optional synthetic mixing (Option A) ---
     # ConcatDataset + WeightedRandomSampler so each batch is an iid mix with
@@ -386,7 +400,7 @@ def main():
                 with autocast_ctx():
                     logits = model(imgs)
                 hyps_ltr = ctc_greedy_decode(logits.float(), id2char)
-                hyps_rtl = [h[::-1] for h in hyps_ltr]
+                hyps_rtl = [flip(h) for h in hyps_ltr]
 
                 for r, h in zip(texts_ref, hyps_rtl):
                     vcer.append(cer_raw(r, h)); vwer.append(wer_raw(r, h))
@@ -426,7 +440,8 @@ def main():
         ckpt_saved = False
         should_stop = False
         ckpt_payload = {"model": model.state_dict(), "vocab": vocab,
-                        "arch_version": arch_version, "use_attention": args.attention}
+                        "arch_version": arch_version, "use_attention": args.attention,
+                        "label_order": "reverse" if args.legacy_reverse else "bidi"}
         if mcer < best_cer:
             best_cer = mcer
             patience_counter = 0
@@ -498,7 +513,7 @@ def main():
                         hyps_ltr = ctc_beam_decode(logits, id2char, beam_width=5,
                                                    bigram_lm=None, lm_weight=0.0)
 
-                    hyps_rtl = [h[::-1] for h in hyps_ltr]
+                    hyps_rtl = [flip(h) for h in hyps_ltr]
                     for r, h in zip(texts_ref, hyps_rtl):
                         tcer.append(cer_raw(r, h)); twer.append(wer_raw(r, h))
                         t_refs.append(r); t_hyps.append(h)

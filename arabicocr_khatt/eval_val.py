@@ -22,7 +22,7 @@ from torchvision import transforms
 
 from .dataset import KHATTDataset
 from .metrics import cer as cer_raw, cer_norm as cer_n_fn, wer as wer_raw, dot_group_cer
-from .model import CRNN, text_to_ids, ids_to_text, ctc_greedy_decode
+from .model import CRNN, text_to_ids, ids_to_text, ctc_greedy_decode, label_flipper
 
 IMAGES_DIR = "./archive/images"
 SPLITS_DIR = "./archive/splits"
@@ -47,14 +47,15 @@ def norm_ar(s: str) -> str:
 
 
 class CRNNCollate:
-    def __init__(self, char2id, unk_id):
+    def __init__(self, char2id, unk_id, flip):
         self.char2id = char2id
         self.unk_id = unk_id
+        self.flip = flip
         self.to_tensor = transforms.ToTensor()
 
     def __call__(self, batch):
         imgs, texts_orig = zip(*batch)
-        texts_ltr = [t[::-1] for t in texts_orig]
+        texts_ltr = [self.flip(t) for t in texts_orig]
         imgs = torch.stack([self.to_tensor(im) for im in imgs], dim=0)
         targets = [torch.tensor(text_to_ids(t, self.char2id, self.unk_id), dtype=torch.long) for t in texts_ltr]
         target_lengths = torch.tensor([len(t) for t in targets], dtype=torch.long)
@@ -69,9 +70,11 @@ def main():
     parser.add_argument("--out", default=None, help="TSV output path (default: RUN_DIR/eval_<split>_samples.tsv)")
     parser.add_argument("--exclude", default=None,
                         help="TSV with a 'filename' column (e.g. runs/exp1/val_suspects.tsv) whose rows to skip")
+    parser.add_argument("--splits-dir", default=SPLITS_DIR,
+                        help="Directory with train/val/test CSVs (default ./archive/splits).")
     args = parser.parse_args()
 
-    csv_path = Path(SPLITS_DIR, f"{args.split}.csv")
+    csv_path = Path(args.splits_dir, f"{args.split}.csv")
     if not csv_path.exists():
         raise FileNotFoundError(f"Split CSV not found: {csv_path}. Run training once to build splits.")
 
@@ -101,20 +104,22 @@ def main():
     char2id = {c: i for i, c in enumerate(vocab)}
     id2char = {i: c for i, c in enumerate(vocab)}
     unk_id = char2id.get("<unk>", 1)
-    print(f"Checkpoint: {args.ckpt}  (arch_version={state.get('arch_version', '?')}, vocab={num_classes})")
+    flip = label_flipper(state)
+    print(f"Checkpoint: {args.ckpt}  (arch_version={state.get('arch_version', '?')}, vocab={num_classes}, "
+          f"label_order={state.get('label_order', 'reverse')})")
 
     model = CRNN(num_classes, use_attention=bool(state.get("use_attention", False))).to(device)
     model.load_state_dict(state["model"])
     model.eval()
 
     ds = KHATTDataset(csv_path, IMAGES_DIR, mode="crnn", crnn_h=HEIGHT, crnn_max_w=MAX_W)
-    collate = CRNNCollate(char2id, unk_id)
+    collate = CRNNCollate(char2id, unk_id, flip)
     loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2,
                         pin_memory=True, collate_fn=collate)
     filenames = pd.read_csv(csv_path)["filename"].tolist()
     print(f"Split: {args.split}  ({len(ds)} samples, {len(loader)} batches)")
 
-    vcer = []; vcer_n = []; vwer = []; vwer_norm = []
+    vcer = []; vcer_n = []; vcer_ns = []; vwer = []; vwer_norm = []
     all_refs = []; all_hyps = []
     samples_to_save = []
 
@@ -124,11 +129,14 @@ def main():
             imgs = imgs.to(device, non_blocking=True)
             logits = model(imgs)
             hyps_ltr = ctc_greedy_decode(logits, id2char)
-            hyps_rtl = [h[::-1] for h in hyps_ltr]
+            hyps_rtl = [flip(h) for h in hyps_ltr]
 
             for r, h in zip(texts_ref, hyps_rtl):
                 vcer.append(cer_raw(r, h))
                 vcer_n.append(cer_n_fn(r, h))
+                # CER with all spaces removed: isolates letter errors from
+                # word-boundary (space insert/delete) ambiguity
+                vcer_ns.append(cer_raw(r.replace(" ", ""), h.replace(" ", "")))
                 vwer.append(wer_raw(r, h))
                 all_refs.append(r); all_hyps.append(h)
                 samples_to_save.append((r, h))
@@ -140,6 +148,7 @@ def main():
 
     mcer    = float(np.mean(vcer)) if vcer else 1.0
     mcer_n  = float(np.mean(vcer_n)) if vcer_n else 1.0
+    mcer_ns = float(np.mean(vcer_ns)) if vcer_ns else 1.0
     mwer    = float(np.mean(vwer)) if vwer else 1.0
     mwer_n  = float(np.mean(vwer_norm)) if vwer_norm else 1.0
     mdot    = dot_group_cer(all_refs, all_hyps)
@@ -158,6 +167,7 @@ def main():
     print("")
     print(f"CER      = {mcer:.4f}")
     print(f"CER(n)   = {mcer_n:.4f}   (diff = {(mcer - mcer_n)*100:+.2f} bp; Arabic ortho-normalized)")
+    print(f"CER(nosp)= {mcer_ns:.4f}   (spaces removed from ref and hyp)")
     print(f"WER      = {mwer:.4f}")
     print(f"WER(n)   = {mwer_n:.4f}")
     print(f"DotCER   = {mdot:.4f}")

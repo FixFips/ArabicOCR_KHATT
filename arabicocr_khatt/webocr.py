@@ -18,7 +18,7 @@ import gradio as gr
 
 from .dataset import read_label
 from .metrics import cer as cer_raw, wer as wer_raw, dot_group_cer
-from .model import CRNN, ctc_greedy_decode, ctc_beam_decode, build_bigram_lm
+from .model import CRNN, ctc_greedy_decode, ctc_beam_decode, build_bigram_lm, label_flipper
 from .preprocess import to_grayscale, binarize, normalize, resize_keep_ratio_height, pad_width
 from .pipeline import (
     HEIGHT, MAX_W, load_checkpoint, prep_line, segment_into_lines,
@@ -37,7 +37,7 @@ def load_vocab_from_ckpt(path: str):
     vocab = state["vocab"]
     id2char = {i: c for i, c in enumerate(vocab)}
     use_attention = bool(state.get("use_attention", False))
-    return vocab, id2char, state["model"], use_attention
+    return vocab, id2char, state["model"], use_attention, label_flipper(state)
 
 
 # ---------------- Robust ImageEditor -> PIL conversion ----------------
@@ -262,7 +262,7 @@ if not os.path.exists(CKPT):
     from huggingface_hub import hf_hub_download
     from .pipeline import DEFAULT_CKPT_FILENAME, DEFAULT_REPO_ID
     CKPT = hf_hub_download(DEFAULT_REPO_ID, DEFAULT_CKPT_FILENAME)
-vocab, id2char, state_dict, _use_attn = load_vocab_from_ckpt(CKPT)
+vocab, id2char, state_dict, _use_attn, _flip = load_vocab_from_ckpt(CKPT)
 char2id = {c: i for i, c in enumerate(vocab)}
 model = CRNN(num_classes=len(vocab), use_attention=_use_attn).to(device)
 model.load_state_dict(state_dict)
@@ -328,7 +328,7 @@ def _decode_from_logits(logits: torch.Tensor, use_beam: bool = False,
                                   lm_weight=lm_weight)[0]
     else:
         hyp_ltr = ctc_greedy_decode(logits, id2char)[0]
-    return hyp_ltr[::-1]  # back to RTL
+    return _flip(hyp_ltr)  # back to RTL
 
 
 def _decode_one(im_pil: Image.Image, device: torch.device, id2char,

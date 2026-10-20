@@ -108,6 +108,39 @@ def text_to_ids(text: str, char2id: dict, unk_id: int) -> list[int]:
     return [char2id.get(ch, unk_id) for ch in text]
 
 
+# Runs that are written left-to-right even inside an RTL line: numbers
+# (ASCII / Arabic-Indic, with internal . , : / separators) and Latin words.
+_LTR_RUN = re.compile(r"[0-9٠-٩]+(?:[.,:/][0-9٠-٩]+)*|[A-Za-z]+")
+
+
+def bidi_flip(text: str) -> str:
+    """Logical RTL order <-> visual left-to-right order (an involution).
+
+    A plain ``text[::-1]`` also reverses digit runs, so "2008" became the CTC
+    target "8002" while the image shows 2-0-0-8 left to right (exp1 got only
+    7/49 multi-digit test numbers right). This reverses the line but keeps
+    LTR runs in their original order.
+    """
+    rev = text[::-1]
+    return _LTR_RUN.sub(lambda m: m.group(0)[::-1], rev)
+
+
+def plain_reverse(text: str) -> str:
+    """Legacy logical<->visual transform (reverses digit runs too)."""
+    return text[::-1]
+
+
+def label_flipper(state: dict):
+    """The logical<->visual transform a checkpoint was trained with.
+
+    Checkpoints saved with ``label_order == "bidi"`` use :func:`bidi_flip`;
+    older ones (exp1/exp2/exp2_ft) were trained on plain reversal.
+    """
+    if state.get("label_order") == "bidi":
+        return bidi_flip
+    return plain_reverse
+
+
 def ids_to_text(ids, id2char: dict) -> str:
     out = []
     for i in ids:

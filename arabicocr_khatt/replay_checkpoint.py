@@ -37,7 +37,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from .dataset import KHATTDataset, read_label
 from .metrics import cer as cer_raw, wer as wer_raw, dot_group_cer
-from .model import (CRNN, text_to_ids, ctc_greedy_decode, ctc_beam_decode,
+from .model import (CRNN, label_flipper, text_to_ids, ctc_greedy_decode, ctc_beam_decode,
                     build_bigram_lm)
 
 IMAGES_DIR = "./archive/images"
@@ -157,6 +157,7 @@ def main():
     char2id = {c: i for i, c in enumerate(vocab)}
     id2char = {i: c for i, c in enumerate(vocab)}
     unk_id = char2id.get("<unk>", 1)
+    flip = label_flipper(state)
     print(f"Checkpoint: {args.ckpt}  (arch_version={state.get('arch_version', '?')}, vocab={num_classes})")
 
     model = CRNN(num_classes, use_attention=bool(state.get("use_attention", False))).to(device)
@@ -199,11 +200,11 @@ def main():
         print(f"  Running {name}...", end=" ", flush=True)
         if cfg is None:
             def run(imgs, m=model, i2c=id2char):
-                return [h[::-1] for h in ctc_greedy_decode(m(imgs), i2c)]
+                return [flip(h) for h in ctc_greedy_decode(m(imgs), i2c)]
         else:
             bw, lm, lw = cfg["beam_width"], cfg["bigram_lm"], cfg["lm_weight"]
             def run(imgs, m=model, i2c=id2char, bw=bw, lm=lm, lw=lw):
-                return [h[::-1] for h in ctc_beam_decode(m(imgs), i2c,
+                return [flip(h) for h in ctc_beam_decode(m(imgs), i2c,
                         beam_width=bw, bigram_lm=lm, lm_weight=lw)]
         r = _evaluate(run, None, loader, device, id2char)
         r["config"] = name

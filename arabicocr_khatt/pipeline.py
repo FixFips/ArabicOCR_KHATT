@@ -31,7 +31,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 
-from .model import CRNN, ctc_beam_decode, ctc_greedy_decode
+from .model import CRNN, ctc_beam_decode, ctc_greedy_decode, label_flipper
 from .preprocess import binarize, normalize, pad_width, resize_keep_ratio_height, to_grayscale
 
 # ---------------- Config (must match training) ----------------
@@ -235,6 +235,7 @@ class ArabicOCR:
         self.id2char = {i: c for i, c in enumerate(self.vocab)}
         self.char2id = {c: i for i, c in enumerate(self.vocab)}
         self.bigram_lm = bigram_lm
+        self._flip = label_flipper(state)
 
         self.model = CRNN(num_classes=len(self.vocab)).to(self.device)
         self.model.load_state_dict(state["model"])
@@ -274,7 +275,7 @@ class ArabicOCR:
             )[0]
         else:
             hyp_ltr = ctc_greedy_decode(logits, self.id2char)[0]
-        return hyp_ltr[::-1]  # model works LTR; reverse back to Arabic RTL
+        return self._flip(hyp_ltr)  # model works LTR; back to Arabic logical order
 
     @torch.inference_mode()
     def recognize_lines(
