@@ -223,3 +223,28 @@ def ctc_lm_beam_decode(log_probs: np.ndarray, id2char: dict, char_lm=None, word_
 
     best = max(beams.items(), key=lambda kv: final(kv[1]))
     return ids_to_text(list(best[0]), id2char)
+
+
+# --------------- Persistence ---------------
+# The LM is stored as its (logical-order, UTF-8, gzipped) training text and
+# rebuilt on load: ~10M chars fit in a few MB and rebuild in seconds, while
+# the count tables would be hundreds of MB. Plain text also avoids pickle,
+# which is unsafe to load from untrusted files.
+
+def save_lm_text(texts, path) -> None:
+    import gzip
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        for t in texts:
+            f.write(t.replace("\n", " ") + "\n")
+
+
+def load_lm_text(path, flip, order: int = 6):
+    """Rebuild (CharNgramLM, WordLexicon) from save_lm_text output.
+
+    ``flip`` must be the checkpoint's logical->decode-order transform
+    (``model.label_flipper(state)``).
+    """
+    import gzip
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        flipped = [flip(line.rstrip("\n")) for line in f if line.strip()]
+    return CharNgramLM(order).fit(flipped), WordLexicon().fit(flipped)

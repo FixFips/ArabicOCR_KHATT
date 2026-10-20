@@ -218,6 +218,10 @@ class ArabicOCR:
         device: torch device string ("cuda", "cpu", "mps"); auto-detected if None.
         bigram_lm: optional Arabic character bigram LM dict for beam search
             (as built by model.build_bigram_lm or loaded via load_bigram_lm_json).
+            Superseded by lm_text; kept for backward compatibility.
+        lm_text: optional .txt.gz written by lm.save_lm_text (e.g. via
+            scripts/lm_decode_sweep.py --save-lm-text). Builds a 6-gram char
+            LM used for beam search with insertion bonus (alpha/beta).
     """
 
     def __init__(
@@ -225,6 +229,8 @@ class ArabicOCR:
         checkpoint: Union[str, Path],
         device: Optional[str] = None,
         bigram_lm: Optional[dict] = None,
+        lm_text: Optional[Union[str, Path]] = None,
+        lm_order: int = 6,
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -236,6 +242,10 @@ class ArabicOCR:
         self.char2id = {c: i for i, c in enumerate(self.vocab)}
         self.bigram_lm = bigram_lm
         self._flip = label_flipper(state)
+        self.char_lm = self.word_lm = None
+        if lm_text is not None:
+            from .lm import load_lm_text
+            self.char_lm, self.word_lm = load_lm_text(lm_text, self._flip, order=lm_order)
 
         self.model = CRNN(num_classes=len(self.vocab)).to(self.device)
         self.model.load_state_dict(state["model"])
@@ -248,6 +258,7 @@ class ArabicOCR:
         filename: str = DEFAULT_CKPT_FILENAME,
         device: Optional[str] = None,
         revision: Optional[str] = None,
+        lm_text: Optional[Union[str, Path]] = None,
     ) -> "ArabicOCR":
         """Download weights (and the bigram LM, if published) from the HF Hub."""
         from huggingface_hub import hf_hub_download
@@ -259,15 +270,21 @@ class ArabicOCR:
             bigram_lm = load_bigram_lm_json(lm_path)
         except Exception:
             pass  # LM is optional — beam search still works without it
-        return cls(ckpt_path, device=device, bigram_lm=bigram_lm)
+        return cls(ckpt_path, device=device, bigram_lm=bigram_lm, lm_text=lm_text)
 
     # ---- inference ----
 
     def _forward(self, prepped: Image.Image) -> torch.Tensor:
         return self.model(_to_tensor(prepped).to(self.device))  # [T, 1, C]
 
-    def _decode(self, logits: torch.Tensor, beam_width: int, lm_weight: float) -> str:
-        if beam_width > 1:
+    def _decode(self, logits: torch.Tensor, beam_width: int, lm_weight: float,
+                alpha: float = 0.5, beta: float = 2.0) -> str:
+        if beam_width > 1 and self.char_lm is not None:
+            from .lm import ctc_lm_beam_decode
+            lp = logits[:, 0].float().log_softmax(-1).cpu().numpy()
+            hyp_ltr = ctc_lm_beam_decode(lp, self.id2char, self.char_lm, self.word_lm,
+                                         alpha=alpha, beta=beta, beam_width=beam_width)
+        elif beam_width > 1:
             lm = self.bigram_lm if lm_weight > 0 else None
             hyp_ltr = ctc_beam_decode(
                 logits, self.id2char,
@@ -286,6 +303,8 @@ class ArabicOCR:
         lm_weight: float = 0.3,
         polarity: str = "auto",
         upscale: float = 1.0,
+        alpha: float = 0.5,
+        beta: float = 2.0,
     ) -> List[str]:
         """Recognize an image and return one string per detected line."""
         pil = _ensure_pil(image)
@@ -303,7 +322,8 @@ class ArabicOCR:
                 tn = self._decode(ln_, beam_width=1, lm_weight=0.0)
                 ti = self._decode(li_, beam_width=1, lm_weight=0.0)
                 logits = li_ if len(ti.strip()) > len(tn.strip()) else ln_
-            texts.append(self._decode(logits, beam_width=beam_width, lm_weight=lm_weight))
+            texts.append(self._decode(logits, beam_width=beam_width, lm_weight=lm_weight,
+                                      alpha=alpha, beta=beta))
         return texts
 
     def recognize(self, image: ImageLike, **kwargs: Any) -> str:
@@ -327,16 +347,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--device", default=None, help='torch device (e.g. "cpu", "cuda")')
     parser.add_argument("--greedy", action="store_true", help="greedy decode (default: beam search)")
     parser.add_argument("--beam-width", type=int, default=10)
-    parser.add_argument("--lm-weight", type=float, default=0.3)
+    parser.add_argument("--lm-weight", type=float, default=0.3, help="legacy bigram LM weight")
+    parser.add_argument("--lm-text", default=None,
+                        help="n-gram LM text (.txt.gz from lm_decode_sweep.py --save-lm-text)")
+    parser.add_argument("--alpha", type=float, default=0.5, help="n-gram LM weight")
+    parser.add_argument("--beta", type=float, default=2.0, help="insertion bonus per character")
     parser.add_argument("--no-segment", action="store_true", help="treat input as a single line")
     parser.add_argument("--polarity", choices=["auto", "normal", "invert"], default="auto")
     parser.add_argument("--upscale", type=float, default=1.0, help="upscale factor for tiny text")
     args = parser.parse_args(argv)
 
     if args.checkpoint:
-        ocr = ArabicOCR(args.checkpoint, device=args.device)
+        ocr = ArabicOCR(args.checkpoint, device=args.device, lm_text=args.lm_text)
     else:
-        ocr = ArabicOCR.from_pretrained(args.repo_id, device=args.device)
+        ocr = ArabicOCR.from_pretrained(args.repo_id, device=args.device, lm_text=args.lm_text)
 
     for path in args.images:
         text = ocr.recognize(
@@ -344,6 +368,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             segment=not args.no_segment,
             beam_width=1 if args.greedy else args.beam_width,
             lm_weight=args.lm_weight,
+            alpha=args.alpha,
+            beta=args.beta,
             polarity=args.polarity,
             upscale=args.upscale,
         )

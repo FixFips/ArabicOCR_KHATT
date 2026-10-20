@@ -78,6 +78,8 @@ def main():
     ap.add_argument("--procs", type=int, default=12)
     ap.add_argument("--work", default="./runs/lm_cache")
     ap.add_argument("--out-tsv", default=None, help="Write per-line preds of the best config.")
+    ap.add_argument("--save-lm-text", default=None,
+                    help="Write the LM training text (.txt.gz) for ArabicOCR(lm_text=...).")
     args = ap.parse_args()
 
     import pandas as pd
@@ -127,6 +129,9 @@ def main():
                 if n_chars >= args.corpus_max_chars:
                     break
         print(f"corpus: {len(texts) - n_in} lines / {n_chars/1e6:.1f}M chars (dropped {dropped} overlapping val/test)")
+    if args.save_lm_text:
+        _lm_worker.lm.save_lm_text(texts, args.save_lm_text)
+        print(f"saved LM text: {args.save_lm_text}")
     flipped = [flip(t) for t in texts]
     t0 = time.time()
     clm = CharNgramLM(args.order).fit(flipped)
