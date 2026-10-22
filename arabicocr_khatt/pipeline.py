@@ -278,12 +278,13 @@ class ArabicOCR:
         return self.model(_to_tensor(prepped).to(self.device))  # [T, 1, C]
 
     def _decode(self, logits: torch.Tensor, beam_width: int, lm_weight: float,
-                alpha: float = 0.5, beta: float = 2.0) -> str:
+                alpha: float = 1.0, beta: float = 3.0, gamma: float = 0.5, oov: float = 4.0) -> str:
         if beam_width > 1 and self.char_lm is not None:
             from .lm import ctc_lm_beam_decode
             lp = logits[:, 0].float().log_softmax(-1).cpu().numpy()
             hyp_ltr = ctc_lm_beam_decode(lp, self.id2char, self.char_lm, self.word_lm,
-                                         alpha=alpha, beta=beta, beam_width=beam_width)
+                                         alpha=alpha, beta=beta, gamma=gamma, oov=oov,
+                                         beam_width=beam_width)
         elif beam_width > 1:
             lm = self.bigram_lm if lm_weight > 0 else None
             hyp_ltr = ctc_beam_decode(
@@ -303,10 +304,16 @@ class ArabicOCR:
         lm_weight: float = 0.3,
         polarity: str = "auto",
         upscale: float = 1.0,
-        alpha: float = 0.5,
-        beta: float = 2.0,
+        alpha: float = 1.0,
+        beta: float = 3.0,
+        gamma: float = 0.5,
+        oov: float = 4.0,
     ) -> List[str]:
-        """Recognize an image and return one string per detected line."""
+        """Recognize an image and return one string per detected line.
+
+        alpha/beta/gamma/oov apply only with ``lm_text``; defaults were tuned on
+        the strict writer-disjoint val split (exp4_strict_s42).
+        """
         pil = _ensure_pil(image)
         lines = segment_into_lines(pil) if segment else [pil]
 
@@ -323,7 +330,7 @@ class ArabicOCR:
                 ti = self._decode(li_, beam_width=1, lm_weight=0.0)
                 logits = li_ if len(ti.strip()) > len(tn.strip()) else ln_
             texts.append(self._decode(logits, beam_width=beam_width, lm_weight=lm_weight,
-                                      alpha=alpha, beta=beta))
+                                      alpha=alpha, beta=beta, gamma=gamma, oov=oov))
         return texts
 
     def recognize(self, image: ImageLike, **kwargs: Any) -> str:
@@ -350,8 +357,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--lm-weight", type=float, default=0.3, help="legacy bigram LM weight")
     parser.add_argument("--lm-text", default=None,
                         help="n-gram LM text (.txt.gz from lm_decode_sweep.py --save-lm-text)")
-    parser.add_argument("--alpha", type=float, default=0.5, help="n-gram LM weight")
-    parser.add_argument("--beta", type=float, default=2.0, help="insertion bonus per character")
+    parser.add_argument("--alpha", type=float, default=1.0, help="n-gram LM weight")
+    parser.add_argument("--beta", type=float, default=3.0, help="insertion bonus per character")
+    parser.add_argument("--gamma", type=float, default=0.5, help="word lexicon weight")
+    parser.add_argument("--oov", type=float, default=4.0, help="out-of-vocabulary word penalty")
     parser.add_argument("--no-segment", action="store_true", help="treat input as a single line")
     parser.add_argument("--polarity", choices=["auto", "normal", "invert"], default="auto")
     parser.add_argument("--upscale", type=float, default=1.0, help="upscale factor for tiny text")
@@ -370,6 +379,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             lm_weight=args.lm_weight,
             alpha=args.alpha,
             beta=args.beta,
+            gamma=args.gamma,
+            oov=args.oov,
             polarity=args.polarity,
             upscale=args.upscale,
         )
