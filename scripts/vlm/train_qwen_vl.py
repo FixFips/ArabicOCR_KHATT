@@ -153,7 +153,7 @@ def main():
     processor = AutoProcessor.from_pretrained(args.model, min_pixels=32 * 28 * 28, max_pixels=args.max_pixels)
     processor.tokenizer.padding_side = "right"
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, attn_implementation="sdpa").cuda()
+        args.model, dtype=torch.bfloat16, attn_implementation="sdpa", device_map="cuda")  # load straight to GPU: a CPU copy plus workers hit the RAM limit
 
     adapter = Path(args.run_dir, "adapter_best")
     if args.eval_only:
