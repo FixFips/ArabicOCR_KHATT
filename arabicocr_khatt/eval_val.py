@@ -65,7 +65,7 @@ class CRNNCollate:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", default="val", choices=["val", "test", "train"])
+    parser.add_argument("--split", default="val", help="split CSV name in --splits-dir (val, test, test_clean, ...)")
     parser.add_argument("--ckpt", default=CKPT_PATH)
     parser.add_argument("--out", default=None, help="TSV output path (default: RUN_DIR/eval_<split>_samples.tsv)")
     parser.add_argument("--exclude", default=None,

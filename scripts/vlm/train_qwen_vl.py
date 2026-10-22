@@ -139,6 +139,7 @@ def main():
     ap.add_argument("--eval-every", type=int, default=200, help="optimizer steps between quick val evals")
     ap.add_argument("--eval-only", action="store_true")
     ap.add_argument("--split", default="test")
+    ap.add_argument("--val-split", default="val_clean", help="split used for adapter selection")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--max-steps", type=int, default=None, help="smoke test: stop after N optimizer steps")
     ap.add_argument("--workers", type=int, default=2)
@@ -173,7 +174,7 @@ def main():
     model.print_trainable_parameters()
 
     train = load_split(args.splits_dir, "train")
-    val = load_split(args.splits_dir, "val")
+    val = load_split(args.splits_dir, args.val_split)
     collate = Collate(processor)
     loader = torch.utils.data.DataLoader(train, batch_size=args.bs, shuffle=True, collate_fn=collate,
                                          num_workers=args.workers, persistent_workers=args.workers > 0)

@@ -1,0 +1,20 @@
+filename	split	issue
+AHTD3A0102_Para2_3.jpg	test	label belongs to another line (image: "...الفضاء بحلول سنة 2010م")
+AHTD3A0223_Para2_4.jpg	test	label belongs to another line
+AHTD3A0424_Para2_1.jpg	test	label belongs to another line (image is fixed-paragraph text)
+AHTD3A0424_Para2_2.jpg	test	label belongs to another line
+AHTD3A0424_Para2_3.jpg	test	label belongs to another line
+AHTD3A0424_Para2_4.jpg	test	label belongs to another line
+AHTD3A0424_Para2_5.jpg	test	label belongs to another line
+AHTD3A0510_Para3_2.jpg	test	label is a full line; image is one word ("عليها")
+AHTD3A0555_Para2_3.jpg	test	paragraph labels shifted by one line
+AHTD3A0555_Para2_4.jpg	test	paragraph labels shifted by one line
+AHTD3A0555_Para2_5.jpg	test	paragraph labels shifted by one line
+AHTD3A0555_Para2_6.jpg	test	paragraph labels shifted by one line
+AHTD3A0555_Para3_4.jpg	test	paragraph labels shifted by one line
+AHTD3A0614_Para2_4.jpg	test	label is "#"; image is the next line's text
+AHTD3A0614_Para2_5.jpg	test	label belongs to the previous line; image is "ارتفاع الشمس"
+AHTD3A0901_Para3_2.jpg	val	paragraph labels shifted by one line
+AHTD3A0901_Para3_3.jpg	val	paragraph labels shifted by one line
+AHTD3A0901_Para3_4.jpg	val	paragraph labels shifted by one line
+AHTD3A0901_Para3_5.jpg	val	paragraph labels shifted by one line
