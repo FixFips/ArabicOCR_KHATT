@@ -92,7 +92,7 @@ class Collate:
 
 
 @torch.no_grad()
-def evaluate(model, processor, items, bs=8, max_new=160, out_tsv=None, limit=None):
+def evaluate(model, processor, items, bs=8, max_new=160, out_tsv=None, limit=None, rep_penalty=1.0):
     model.eval()
     tok = processor.tokenizer
     tok.padding_side = "left"
@@ -104,7 +104,8 @@ def evaluate(model, processor, items, bs=8, max_new=160, out_tsv=None, limit=Non
         imgs = [Image.open(f).convert("RGB") for f, _ in chunk]
         enc = processor(text=[prompt] * len(chunk), images=imgs, return_tensors="pt", padding=True).to(model.device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            out = model.generate(**enc, max_new_tokens=max_new, do_sample=False, repetition_penalty=1.05)
+            out = model.generate(**enc, max_new_tokens=max_new, do_sample=False, repetition_penalty=rep_penalty,
+                                 use_cache=True)  # training turns the KV cache off (grad checkpointing)
         dec = tok.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
         for (_, ref), h in zip(chunk, dec):
             refs.append(ref); hyps.append(_WS.sub(" ", h).strip())
@@ -143,6 +144,10 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--max-steps", type=int, default=None, help="smoke test: stop after N optimizer steps")
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--rep-penalty", type=float, default=1.0,
+                    help="generation repetition penalty; >1 hurts Arabic, where tokens like \"ال\" repeat")
+    ap.add_argument("--val-limit", type=int, default=200,
+                    help="val lines scored during training (full val takes ~16 min)")
     args = ap.parse_args()
 
     from peft import LoraConfig, PeftModel, get_peft_model
@@ -160,7 +165,8 @@ def main():
         model = PeftModel.from_pretrained(model, str(adapter)).cuda()
         items = load_split(args.splits_dir, args.split)
         t0 = time.time()
-        m = evaluate(model, processor, items, out_tsv=Path(args.run_dir, f"eval_{args.split}.tsv"), limit=args.limit)
+        m = evaluate(model, processor, items, out_tsv=Path(args.run_dir, f"eval_{args.split}.tsv"), limit=args.limit,
+                     rep_penalty=args.rep_penalty)
         print(f"[{args.split}] " + " ".join(f"{k}={v:.4f}" if k != "n" else f"n={v}" for k, v in m.items())
               + f"  ({time.time() - t0:.0f}s)")
         return
@@ -206,7 +212,7 @@ def main():
                       f"{(time.time() - t0) / step:.2f}s/step", flush=True)
                 run_loss = 0.0
             if step % args.eval_every == 0 or step == steps:
-                m = evaluate(model, processor, val)  # full val each time: consistent selection
+                m = evaluate(model, processor, val, limit=args.val_limit, rep_penalty=args.rep_penalty)  # same subset each time
                 print(f"  val@{step}: CER={m['CER']:.4f} CER(n)={m['CER(n)']:.4f} WER={m['WER']:.4f} (n={m['n']})", flush=True)
                 log.write(f"{time.strftime('%H:%M:%S')},{step},{loss.item() * args.accum:.4f},"
                           f"{m['CER']:.4f},{m['CER(n)']:.4f},{m['WER']:.4f}\n"); log.flush()
